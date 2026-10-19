@@ -1,11 +1,11 @@
-/* EKB core — shared by the Apps Script backend, the PWA and the Node tests.
+/* JIN (EKB) core — shared by the Apps Script backend, the PWA and the Node tests.
  * Pure functions only: no Sheets, no DOM, no network.
  * Plain ES2017, no modules, so the same file runs as an Apps Script .gs file.
  */
 var EKBCore = (function () {
   'use strict';
 
-  var SCHEMA_VERSION = '3.1';
+  var SCHEMA_VERSION = '3.2';
   var DELIM = '; ';
   var CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
   var FREQUENCY = ['High', 'Medium', 'Low'];
@@ -16,7 +16,7 @@ var EKBCore = (function () {
   var COLUMNS = {
     Knowledge_Master: ['word_id', 'word', 'word_key', 'ipa', 'thai_pron', 'cefr', 'pos', 'meaning_en', 'meaning_th',
       'synonym', 'antonym', 'collocation', 'word_family', 'root', 'prefix', 'suffix', 'frequency', 'register',
-      'example', 'example_th', 'pattern_id', 'related_expressions', 'tags', 'difficulty', 'source', 'date_added', 'notes'],
+      'example', 'example_th', 'pattern_id', 'related_expressions', 'tags', 'difficulty', 'source', 'date_added', 'notes', 'usage_tip'],
     Pattern_Master: ['pattern_id', 'pattern', 'category', 'cefr', 'meaning_en', 'meaning_th', 'structure', 'formality', 'notes', 'difficulty'],
     Pattern_Examples: ['example_id', 'pattern_id', 'example_en', 'example_th', 'note', 'source'],
     Mistake_Log: ['mistake_id', 'wrong_text', 'correct_text', 'error_type', 'reason_en', 'reason_th', 'pattern_id',
@@ -195,7 +195,8 @@ var EKBCore = (function () {
       example_th: str(e.example_th),
       difficulty: diff,
       source: str(e.source) || 'claude',
-      notes: str(e.notes)
+      notes: str(e.notes),
+      usage_tip: str(e.usage_tip)
     };
     LIST_FIELDS.forEach(function (f) { row[f] = joinList(e[f]); });
     return { errors: errors, warnings: warnings, row: row, pattern_ref: str(e.pattern_ref || e.pattern_id) };
@@ -281,7 +282,9 @@ var EKBCore = (function () {
     var nextPattern = makePatternIdAllocator(pm.map(function (r) { return r.pattern_id; }));
 
     var wordByKey = {};
-    km.forEach(function (r) { wordByKey[normalizeKey(r.word_key || r.word)] = r.word_id; });
+    var wordRowById = {};
+    var tipFilled = {};
+    km.forEach(function (r) { wordByKey[normalizeKey(r.word_key || r.word)] = r.word_id; wordRowById[r.word_id] = r; });
     var patternIds = {};
     var patternByText = {};
     pm.forEach(function (r) {
@@ -352,7 +355,16 @@ var EKBCore = (function () {
         item.warnings = v.warnings;
         if (v.errors.length) { item.status = 'invalid'; item.errors = v.errors; counts.invalid += 1; return; }
         if (wordByKey[v.row.word_key]) {
-          item.status = 'duplicate'; item.id = wordByKey[v.row.word_key]; counts.duplicate += 1; return;
+          var dupId = wordByKey[v.row.word_key];
+          item.id = dupId;
+          var oldRow = wordRowById[dupId];
+          // Only fills a blank usage_tip on a saved row; never overwrites a value.
+          if (oldRow && v.row.usage_tip && !str(oldRow.usage_tip) && !tipFilled[dupId]) {
+            updates.push({ table: 'Knowledge_Master', idCol: 'word_id', id: dupId, col: 'usage_tip', value: v.row.usage_tip });
+            tipFilled[dupId] = true;
+            item.status = 'filled'; counts.updated += 1; return;
+          }
+          item.status = 'duplicate'; counts.duplicate += 1; return;
         }
         var p = resolvePattern(v.pattern_ref);
         if (p.warning) item.warnings.push(p.warning);
@@ -461,11 +473,67 @@ var EKBCore = (function () {
     return dayString(d);
   }
 
+  /** yyyy-mm-dd for an instant, in Asia/Bangkok (UTC+7, no DST), whatever the device timezone is. */
+  function bkkDay(d) {
+    var t = (d instanceof Date) ? d.getTime() : (d === undefined ? Date.now() : new Date(d).getTime());
+    var b = new Date(t + 7 * 3600 * 1000);
+    return b.getUTCFullYear() + '-' + pad(b.getUTCMonth() + 1, 2) + '-' + pad(b.getUTCDate(), 2);
+  }
+
+  /** yyyy-mm-ddTHH:MM:SS in Asia/Bangkok: the format Learning_History.logged_at uses. */
+  function bkkIso(d) {
+    var t = (d instanceof Date) ? d.getTime() : (d === undefined ? Date.now() : new Date(d).getTime());
+    var b = new Date(t + 7 * 3600 * 1000);
+    return bkkDay(d === undefined ? new Date(t) : d) + 'T' + pad(b.getUTCHours(), 2) + ':' + pad(b.getUTCMinutes(), 2) + ':' + pad(b.getUTCSeconds(), 2);
+  }
+
+  // ---------- history (server rows + events still on the phone) ----------
+  function cidOf(row) {
+    if (!row) return '';
+    if (row.cid) return String(row.cid);
+    var m = /cid:([\w-]+)/.exec(String(row.note || ''));
+    return m ? m[1] : '';
+  }
+
+  /** Server Learning_History plus local pending events, de-duplicated by cid. */
+  function mergeHistory(serverHistory, pending) {
+    var out = (serverHistory || []).slice();
+    var have = {};
+    out.forEach(function (r) { var c = cidOf(r); if (c) have[c] = true; });
+    (pending || []).forEach(function (e) {
+      var c = cidOf(e);
+      if (c && have[c]) return;
+      if (c) have[c] = true;
+      out.push(e);
+    });
+    return out;
+  }
+
+  /**
+   * Which local events can be forgotten: only those the freshly exported history already holds,
+   * or that the server said it will never store (skipped). Everything else stays on the phone,
+   * even after log_reviews answered OK, until an export proves the rows are there.
+   */
+  function prunePending(pending, serverHistory, skippedCids) {
+    var have = {};
+    (serverHistory || []).forEach(function (r) { var c = cidOf(r); if (c) have[c] = true; });
+    (skippedCids || []).forEach(function (c) { have[c] = true; });
+    return (pending || []).filter(function (e) { return !have[cidOf(e)]; });
+  }
+
+  /** Spaced repetition only counts flashcard reviews (old rows may have no activity: treat as flashcard). */
+  function isFlashcard(activity) {
+    var a = str(activity);
+    return !a || a.indexOf('flashcard') === 0;
+  }
+
+  // ---------- spaced repetition (derived from Learning_History, never stored) ----------
   /**
    * Replays the log and returns {word_id: state}.
    * Rules: Correct -> stage+1, Partial -> stage stays, Wrong -> stage 0.
    * Several reviews of one word on the same day: only the first counts for the stage
    * (so drilling a word 5 times today does not jump it to a 3-month interval).
+   * Quiz rows (activity quiz_*) are ignored here.
    */
   function replayHistory(history, config) {
     config = config || {};
@@ -474,8 +542,9 @@ var EKBCore = (function () {
     var minAcc = Number(config.mastery_min_accuracy) || 0.85;
     var top = intervals.length - 1;
 
-    var events = (history || []).filter(function (h) { return h && h.word_id && h.logged_at && RESULTS.indexOf(h.result) >= 0; })
-      .slice().sort(function (a, b) { return String(a.logged_at) < String(b.logged_at) ? -1 : String(a.logged_at) > String(b.logged_at) ? 1 : 0; });
+    var events = (history || []).filter(function (h) {
+      return h && h.word_id && h.logged_at && RESULTS.indexOf(h.result) >= 0 && isFlashcard(h.activity);
+    }).slice().sort(function (a, b) { return String(a.logged_at) < String(b.logged_at) ? -1 : String(a.logged_at) > String(b.logged_at) ? 1 : 0; });
 
     var state = {};
     events.forEach(function (h) {
@@ -507,33 +576,220 @@ var EKBCore = (function () {
   }
 
   /**
-   * Builds today's queue: due reviews first (oldest due first), then new words up to the daily goal
-   * minus the new words already started today.
+   * The review queue, with no target:
+   *   due    = every word whose review date has come, oldest due first
+   *   fresh  = never-reviewed words, oldest id first
+   *   freshCap = how many new words to start today before the round says "nothing due"
+   *              (daily_goal_new_words, a quiet cap; the user can still ask for more)
+   *   ahead  = words not due yet, soonest first (for "review ahead")
    */
   function buildQueue(words, history, config, todayYmd) {
     config = config || {};
     var st = replayHistory(history, config);
-    var goalNew = Number(config.daily_goal_new_words) || 5;
-    var goalRev = Number(config.daily_goal_reviews) || 20;
+    var goalNew = config.daily_goal_new_words === undefined || config.daily_goal_new_words === '' ? 5 : Number(config.daily_goal_new_words);
+    if (!isFinite(goalNew) || goalNew < 0) goalNew = 5;
     var due = [];
     var fresh = [];
+    var ahead = [];
     var startedToday = 0;
     (words || []).forEach(function (w) {
       var s = st[w.word_id];
       if (!s) { fresh.push(w); return; }
       if (s.first === todayYmd) startedToday += 1;
       if (s.due <= todayYmd) due.push({ w: w, due: s.due });
+      else ahead.push({ w: w, due: s.due });
     });
-    due.sort(function (a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : 0; });
+    var byDue = function (a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : (String(a.w.word_id) < String(b.w.word_id) ? -1 : 1); };
+    due.sort(byDue);
+    ahead.sort(byDue);
     fresh.sort(function (a, b) { return String(a.word_id) < String(b.word_id) ? -1 : 1; });
-    var newSlots = Math.max(0, goalNew - startedToday);
     return {
-      due: due.slice(0, goalRev).map(function (x) { return x.w; }),
+      due: due.map(function (x) { return x.w; }),
       dueTotal: due.length,
-      fresh: fresh.slice(0, newSlots),
+      fresh: fresh,
       freshTotal: fresh.length,
+      freshCap: Math.max(0, goalNew - startedToday),
+      ahead: ahead.map(function (x) { return x.w; }),
       state: st
     };
+  }
+
+  /** "ทบทวนวันนี้": distinct words with a flashcard review today, and the share answered Correct. */
+  function todayStats(history, todayYmd) {
+    var ids = {};
+    var total = 0;
+    var correct = 0;
+    (history || []).forEach(function (h) {
+      if (!h || !h.word_id || !isFlashcard(h.activity) || RESULTS.indexOf(h.result) < 0) return;
+      if (String(h.logged_at).slice(0, 10) !== todayYmd) return;
+      ids[h.word_id] = true;
+      total += 1;
+      if (h.result === 'Correct') correct += 1;
+    });
+    return { words: Object.keys(ids).length, total: total, correct: correct, pct: total ? Math.round(100 * correct / total) : null };
+  }
+
+  // ---------- parts of speech and preposition colours (one table for the whole app) ----------
+  var POS_STYLE = {
+    noun: { label: 'N', full: 'noun', bg: '#FFF1C2', box: '#F2C230', ink: '#15171A', dark: '#F2D15C' },
+    verb: { label: 'V', full: 'verb', bg: '#D7F2E0', box: '#3DB06E', ink: '#0F1F15', dark: '#6FD99A' },
+    'phrasal verb': { label: 'PHV', full: 'phrasal verb', bg: '#A9D4B8', box: '#1E6B40', ink: '#FFFFFF', dark: '#8FD1A8' },
+    adjective: { label: 'ADJ', full: 'adjective', bg: '#D9ECFA', box: '#4FA3E0', ink: '#0E1A24', dark: '#7CC0EE' },
+    adverb: { label: 'ADV', full: 'adverb', bg: '#EAE1FA', box: '#A98BE0', ink: '#1A1029', dark: '#C3AEEE' },
+    idiom: { label: 'IDM', full: 'idiom', bg: '#FBDDE5', box: '#E0567A', ink: '#2A0A14', dark: '#FF8FB0' },
+    other: { label: 'PHR', full: 'phrase', bg: '#FDE3D2', box: '#F08A4B', ink: '#2A1406', dark: '#FFB384' }
+  };
+  var POS_ALIAS = { n: 'noun', v: 'verb', adj: 'adjective', adv: 'adverb', phv: 'phrasal verb', 'phrasal-verb': 'phrasal verb' };
+  var CARD_INK = '#15171A';
+  var PREP_COLORS = { to: '#C2410C', about: '#1D6FB8', over: '#5B21B6', into: '#B4235A', 'with': '#0F766E', as: '#A15C07', 'for': '#475569', on: '#166534', 'in': '#9F1239', of: '#3F3F46' };
+  var PREP_COLORS_LIGHT = { to: '#FF9B6A', about: '#7CC4FF', over: '#C3AEEE', into: '#FF8FB8', 'with': '#5EEAD4', as: '#F2B45A', 'for': '#CBD5E1' };
+  var PREP_DEFAULT = '#3F3F46';
+  var PREP_DEFAULT_LIGHT = '#D4D4D8';
+  var QUIZ_PREP_FILL = ['to', 'about', 'for', 'with', 'as', 'on', 'in', 'of'];
+
+  /** "noun/verb" -> "noun"; unknown -> "other". */
+  function posKey(pos) {
+    var p = str(pos).toLowerCase().split('/')[0].trim().replace(/\s+/g, ' ');
+    p = POS_ALIAS[p] || p;
+    return POS_STYLE[p] ? p : 'other';
+  }
+
+  function posStyle(pos) {
+    var k = posKey(pos);
+    var s = POS_STYLE[k];
+    var first = str(pos).toLowerCase().split('/')[0].trim();
+    return { key: k, label: s.label, full: k === 'other' ? (first || s.full) : s.full, bg: s.bg, box: s.box, ink: s.ink, dark: s.dark, text: CARD_INK };
+  }
+
+  function prepColor(prep, onDark) {
+    var p = str(prep).toLowerCase();
+    if (onDark) return Object.prototype.hasOwnProperty.call(PREP_COLORS_LIGHT, p) ? PREP_COLORS_LIGHT[p] : PREP_DEFAULT_LIGHT;
+    return Object.prototype.hasOwnProperty.call(PREP_COLORS, p) ? PREP_COLORS[p] : PREP_DEFAULT;
+  }
+
+  /**
+   * collocation "talk + to = คุยกับ (ใคร); small talk" ->
+   *   { preps: [{base:'talk', prep:'to', meaning:'คุยกับ (ใคร)'}], plain: ['small talk'] }
+   */
+  var PREP_ROW = /^(.+?)\s*\+\s*([a-z]+(?: [a-z]+)?)\s*=\s*(.+)$/i;
+  function splitCollocation(v) {
+    var preps = [];
+    var plain = [];
+    toList(v).forEach(function (item) {
+      var m = PREP_ROW.exec(item);
+      if (m) preps.push({ base: str(m[1]), prep: m[2].toLowerCase(), meaning: str(m[3]) });
+      else plain.push(item);
+    });
+    return { preps: preps, plain: plain };
+  }
+
+  /** Splits text into [{t, hit}] so the UI can bold the head word (case-insensitive). No match -> one plain part. */
+  function highlightParts(text, word) {
+    var t = String(text == null ? '' : text);
+    var w = str(word);
+    if (!w || !t) return [{ t: t, hit: false }];
+    var lower = t.toLowerCase();
+    var key = w.toLowerCase();
+    var out = [];
+    var from = 0;
+    var at = lower.indexOf(key);
+    if (at < 0) return [{ t: t, hit: false }];
+    while (at >= 0) {
+      if (at > from) out.push({ t: t.slice(from, at), hit: false });
+      out.push({ t: t.slice(at, at + key.length), hit: true });
+      from = at + key.length;
+      at = lower.indexOf(key, from);
+    }
+    if (from < t.length) out.push({ t: t.slice(from), hit: false });
+    return out;
+  }
+
+  /** Splits a usage tip into [{t, prep}] where prep is set for whole-word prepositions from the colour table. */
+  function tipParts(text) {
+    var t = String(text == null ? '' : text);
+    var out = [];
+    var re = /(^|[^A-Za-z])(to|about|over|into|with|as|for|on|in|of)(?![A-Za-z])/gi;
+    var from = 0;
+    var m;
+    while ((m = re.exec(t)) !== null) {
+      var start = m.index + m[1].length;
+      if (start > from) out.push({ t: t.slice(from, start), prep: '' });
+      out.push({ t: m[2], prep: m[2].toLowerCase() });
+      from = start + m[2].length;
+      re.lastIndex = from;
+    }
+    if (from < t.length) out.push({ t: t.slice(from), prep: '' });
+    return out.length ? out : [{ t: t, prep: '' }];
+  }
+
+  // ---------- quizzes shown between cards ----------
+  function shuffle(arr, rng) {
+    var a = arr.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(rng() * (i + 1));
+      var x = a[i]; a[i] = a[j]; a[j] = x;
+    }
+    return a;
+  }
+
+  /** Words answered Correct on a flashcard at least once, minus the excluded ids (the card just seen). */
+  function quizEligible(words, history, excludeIds) {
+    var ok = {};
+    (history || []).forEach(function (h) {
+      if (h && h.result === 'Correct' && isFlashcard(h.activity)) ok[h.word_id] = true;
+    });
+    var ex = {};
+    (excludeIds || []).forEach(function (id) { ex[id] = true; });
+    return (words || []).filter(function (w) { return ok[w.word_id] && !ex[w.word_id]; });
+  }
+
+  /** Type A: part of speech (4 buttons) + Thai meaning (4 choices). */
+  function makeQuizA(word, words, rng) {
+    rng = rng || Math.random;
+    var answer = posKey(word.pos);
+    var base = ['noun', 'verb', 'adjective', 'adverb'];
+    var opts = base.slice();
+    if (opts.indexOf(answer) < 0) {
+      var wrongs = opts.filter(function (k) { return k !== answer; });
+      opts[opts.indexOf(wrongs[Math.floor(rng() * wrongs.length)])] = answer;
+    }
+    var right = str(word.meaning_th) || str(word.meaning_en);
+    var seen = {};
+    seen[normalizeKey(right)] = true;
+    var pool = [];
+    shuffle(words || [], rng).forEach(function (w) {
+      if (w.word_id === word.word_id) return;
+      var m = str(w.meaning_th) || str(w.meaning_en);
+      var k = normalizeKey(m);
+      if (!m || seen[k]) return;
+      seen[k] = true;
+      pool.push(m);
+    });
+    var meanings = shuffle([right].concat(pool.slice(0, 3)), rng);
+    return { type: 'A', word: word, posOptions: opts, posAnswer: answer, meaningOptions: meanings, meaningAnswer: right };
+  }
+
+  /** Type B: guess the preposition. Only for words with "base + prep = meaning" collocations. */
+  function makeQuizB(word, rng) {
+    rng = rng || Math.random;
+    var rows = splitCollocation(word.collocation).preps;
+    if (!rows.length) return null;
+    var target = rows[Math.floor(rng() * rows.length)];
+    var opts = [target.prep];
+    shuffle(rows, rng).forEach(function (r) { if (opts.length < 4 && opts.indexOf(r.prep) < 0) opts.push(r.prep); });
+    QUIZ_PREP_FILL.forEach(function (p) { if (opts.length < 4 && opts.indexOf(p) < 0) opts.push(p); });
+    return { type: 'B', word: word, base: target.base, meaning: target.meaning, answer: target.prep, options: shuffle(opts, rng), rows: rows };
+  }
+
+  /** Picks the quiz to show, or null when no word qualifies. B about half the time when the word allows it. */
+  function pickQuiz(words, history, excludeIds, rng) {
+    rng = rng || Math.random;
+    var pool = quizEligible(words, history, excludeIds);
+    if (!pool.length) return null;
+    var w = pool[Math.floor(rng() * pool.length)];
+    var hasB = splitCollocation(w.collocation).preps.length > 0;
+    if (hasB && rng() < 0.5) return makeQuizB(w, rng);
+    return makeQuizA(w, words, rng);
   }
 
   return {
@@ -541,6 +797,9 @@ var EKBCore = (function () {
     DELIM: DELIM,
     COLUMNS: COLUMNS,
     RESULTS: RESULTS,
+    POS_STYLE: POS_STYLE,
+    PREP_COLORS: PREP_COLORS,
+    PREP_COLORS_LIGHT: PREP_COLORS_LIGHT,
     normalizeKey: normalizeKey,
     toList: toList,
     joinList: joinList,
@@ -550,8 +809,25 @@ var EKBCore = (function () {
     makeIdAllocator: makeIdAllocator,
     replayHistory: replayHistory,
     buildQueue: buildQueue,
+    todayStats: todayStats,
+    mergeHistory: mergeHistory,
+    prunePending: prunePending,
+    isFlashcard: isFlashcard,
     dayString: dayString,
-    addDays: addDays
+    addDays: addDays,
+    bkkDay: bkkDay,
+    bkkIso: bkkIso,
+    posKey: posKey,
+    posStyle: posStyle,
+    prepColor: prepColor,
+    splitCollocation: splitCollocation,
+    highlightParts: highlightParts,
+    tipParts: tipParts,
+    shuffle: shuffle,
+    quizEligible: quizEligible,
+    makeQuizA: makeQuizA,
+    makeQuizB: makeQuizB,
+    pickQuiz: pickQuiz
   };
 })();
 

@@ -1,10 +1,16 @@
 /* Offline cache. Bump VERSION whenever any app file changes. */
-var VERSION = 'ekb-v1.0.0';
+var VERSION = 'jin-v2.0.0';
 var SHELL = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+  'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png'];
+var FONT_CSS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap';
 
 self.addEventListener('install', function (e) {
-  e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));
+  // One missing file must not stop the whole install (the app shell is what makes offline work).
+  e.waitUntil(caches.open(VERSION).then(function (c) {
+    return Promise.all(SHELL.concat([FONT_CSS]).map(function (u) {
+      return c.add(new Request(u, { cache: 'reload' })).catch(function () {});
+    }));
+  }).then(function () { return self.skipWaiting(); }));
 });
 self.addEventListener('activate', function (e) {
   e.waitUntil(caches.keys().then(function (keys) {
@@ -16,11 +22,12 @@ self.addEventListener('fetch', function (e) {
   if (req.method !== 'GET') return; // API calls are POST: never cached
   var url = new URL(req.url);
   if (url.hostname.indexOf('script.google') >= 0) return;
-  // Fonts: cache after first load so the app looks the same offline.
+  // Fonts: keep after first load so the app looks the same offline; offline without them falls back to system-ui.
   if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
     e.respondWith(caches.open(VERSION).then(function (c) {
-      return c.match(req).then(function (hit) {
-        return hit || fetch(req).then(function (res) { c.put(req, res.clone()); return res; });
+      return c.match(req, { ignoreVary: true }).then(function (hit) {
+        return hit || fetch(req).then(function (res) { if (res.ok || res.type === 'opaque') c.put(req, res.clone()); return res; })
+          .catch(function () { return new Response('', { status: 503 }); });
       });
     }));
     return;
