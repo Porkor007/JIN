@@ -2,130 +2,175 @@
 <html lang="th">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>EKB</title>
-<meta name="theme-color" content="#2B2F33">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#18191B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="EKB">
+<meta name="apple-mobile-web-app-title" content="JIN">
+<title>JIN</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="icon" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&amp;family=IBM+Plex+Sans+Thai:wght@400;500;600;700&amp;display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main id="app">
 
-  <!-- HOME -->
+  <!-- ============================================================ home -->
   <section class="view" id="view-home">
-    <header class="road" aria-label="ความคืบหน้าคลังคำ">
-      <div class="road-label">
-        <span class="sta" id="sta">STA 0+000</span>
-        <span class="sta-goal" id="sta-goal">เป้า 1+000</span>
+    <header class="home-head">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">JIN</div>
+        <div>
+          <div class="hello">สวัสดี Gap</div>
+          <div class="date" id="home-date"></div>
+        </div>
       </div>
-      <div class="road-strip" id="road-strip">
-        <div class="road-done" id="road-done"></div>
-        <div class="road-mastered" id="road-mastered"></div>
-        <div class="road-centerline"></div>
-        <div class="road-ticks" id="road-ticks"></div>
+      <div class="head-actions">
+        <button class="icon-btn" id="settings-btn" aria-label="ตั้งค่า"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg></button>
+        <button class="icon-btn" id="sync-btn" aria-label="Sync"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2"></path><path d="M3 12a9 9 0 0 1 15.5-6.2"></path><path d="M18 2v4h-4"></path><path d="M6 22v-4h4"></path></svg></button>
       </div>
-      <p class="road-caption" id="road-caption">ยังไม่มีข้อมูล ไปที่ตั้งค่าเพื่อเชื่อมฐานข้อมูล</p>
     </header>
 
-    <div class="today">
-      <h1 id="today-title">วันนี้</h1>
-      <p class="today-line"><b id="due-count">0</b> คำถึงรอบทบทวน</p>
-      <p class="today-line"><b id="new-count">0</b> คำใหม่</p>
-      <button class="btn-marking" id="start-btn">เริ่มทบทวน</button>
-      <p class="hint" id="start-hint"></p>
+    <div class="stat-grid">
+      <div class="stat">
+        <span class="stat-label">คำศัพท์ในคลัง</span>
+        <span class="stat-num" id="stat-words">0</span>
+        <span class="stat-sub" id="stat-patterns">+ Pattern 0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">ทบทวนวันนี้</span>
+        <span class="stat-num accent" id="stat-today">0</span>
+        <span class="stat-sub" id="stat-acc">ยังไม่ได้ทบทวน</span>
+      </div>
     </div>
 
-    <div class="sync-row">
-      <div>
-        <p class="sync-status" id="sync-status">ยังไม่เคย sync</p>
-        <p class="sync-pending" id="sync-pending"></p>
-      </div>
-      <button class="btn-quiet" id="sync-btn">Sync</button>
-    </div>
-  </section>
-
-  <!-- REVIEW -->
-  <section class="view" id="view-review" hidden>
-    <div class="review-top">
-      <button class="btn-text" id="review-quit">จบรอบ</button>
-      <span class="review-progress" id="review-progress">1 / 10</span>
-    </div>
-    <div class="progress-bar"><div id="review-bar"></div></div>
-
-    <article class="card" id="card" tabindex="0" aria-live="polite">
-      <div class="card-front">
-        <p class="card-kind" id="card-kind"></p>
-        <h2 class="card-word" id="card-word"></h2>
-        <p class="card-sub" id="card-sub"></p>
-        <p class="card-tap" id="card-tap">แตะเพื่อดูคำตอบ</p>
-      </div>
-      <div class="card-back" id="card-back" hidden>
-        <p class="card-meaning" id="card-meaning"></p>
-        <p class="card-meaning-en" id="card-meaning-en"></p>
-        <div class="card-example" id="card-example"></div>
-        <p class="card-extra" id="card-extra"></p>
-      </div>
-      <button class="btn-speak" id="speak-btn" aria-label="ฟังเสียง">
-        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+    <div class="pad">
+      <button class="start-btn" id="start-btn">
+        <span class="start-text">
+          <span class="start-title" id="start-title">เริ่มทบทวน</span>
+          <span class="start-sub" id="start-sub">ครบกำหนด 0 คำ · พอเมื่อไหร่กดจบรอบ</span>
+        </span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="M13 6l6 6-6 6"></path></svg>
       </button>
-    </article>
+    </div>
 
-    <div class="answers" id="answers" hidden>
-      <button class="ans ans-wrong" data-result="Wrong">ไม่ได้</button>
-      <button class="ans ans-partial" data-result="Partial">เกือบ</button>
-      <button class="ans ans-correct" data-result="Correct">ได้</button>
+    <!-- later phases put dungeon / homework / rules / practice cards here -->
+    <div id="home-slots"></div>
+
+    <p class="sync-line"><span id="sync-status">ยังไม่เคย sync</span> <span id="sync-pending" class="sync-pending"></span></p>
+  </section>
+
+  <!-- ============================================================ review -->
+  <section class="view view-fixed" id="view-review" hidden>
+    <div class="review-top">
+      <span class="reviewed"><svg viewBox="0 0 24 24" class="ok-tick" aria-hidden="true"><path d="M5 12l5 5L20 7"></path></svg>ทบทวนแล้ว <b id="review-count">0</b> คำ</span>
+      <button class="end-btn" id="review-end">จบรอบ</button>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="card-peek" id="card-peek" aria-hidden="true"></div>
+      <article class="card" id="card" tabindex="0" aria-live="polite" aria-label="การ์ดคำศัพท์ แตะเพื่อพลิก">
+        <div class="card-inner" id="card-inner">
+          <div class="face face-front" id="face-front"></div>
+          <div class="face face-back" id="face-back"><div class="back-scroll" id="back-scroll"></div></div>
+        </div>
+        <div class="swipe-tag" id="swipe-tag" aria-hidden="true"></div>
+      </article>
+
+      <div class="empty-panel" id="review-empty" hidden>
+        <svg viewBox="0 0 24 24" class="empty-icon" aria-hidden="true"><path d="M5 12l5 5L20 7"></path></svg>
+        <p class="empty-title">ไม่มีคำครบกำหนดแล้ว</p>
+        <p class="empty-sub" id="empty-sub"></p>
+        <div class="empty-actions">
+          <button class="btn-primary" id="more-new">เรียนคำใหม่ต่อ</button>
+          <button class="btn-ghost" id="more-ahead">ทบทวนล่วงหน้า</button>
+          <button class="btn-ghost" id="empty-end">จบรอบ</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="answers" id="answers">
+      <button class="ans ans-bad" data-result="Wrong"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"></path><path d="M11 6l-6 6 6 6"></path></svg><span class="ans-label">ไม่ได้</span><span class="ans-hint">ปัดซ้าย</span></button>
+      <button class="ans ans-mid" data-result="Partial"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"></path><path d="M6 11l6-6 6 6"></path></svg><span class="ans-label">เกือบ</span><span class="ans-hint">ปัดขึ้น</span></button>
+      <button class="ans ans-good" data-result="Correct"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="M13 6l6 6-6 6"></path></svg><span class="ans-label">ได้</span><span class="ans-hint">ปัดขวา</span></button>
     </div>
   </section>
 
-  <!-- DONE -->
+  <!-- ============================================================ quiz -->
+  <section class="view view-fixed" id="view-quiz" hidden>
+    <div class="review-top">
+      <button class="icon-btn" id="quiz-close" aria-label="ข้ามคำถาม"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg></button>
+      <span class="quiz-badge"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"></path></svg><span id="quiz-title">คำถามแทรก</span></span>
+      <span class="quiz-count">ทบทวนแล้ว <span id="quiz-reviewed">0</span></span>
+    </div>
+    <div class="quiz-body" id="quiz-body"></div>
+    <div class="quiz-foot" id="quiz-foot"></div>
+  </section>
+
+  <!-- ============================================================ summary -->
   <section class="view" id="view-done" hidden>
-    <div class="done">
-      <h1>จบรอบแล้ว</h1>
-      <p class="done-big" id="done-big"></p>
-      <p id="done-detail"></p>
-      <button class="btn-marking" id="done-home">กลับหน้าแรก</button>
+    <div class="sum-head">
+      <span class="sum-time" id="sum-time"></span>
+      <span class="sum-pct" id="sum-pct">0%</span>
+      <span class="sum-words" id="sum-words"></span>
+    </div>
+    <div class="pad">
+      <div class="sum-bar" id="sum-bar" role="img"></div>
+      <div class="sum-boxes">
+        <div class="sum-box good"><span>ได้</span><b id="sum-good">0</b></div>
+        <div class="sum-box mid"><span>เกือบ</span><b id="sum-mid">0</b></div>
+        <div class="sum-box bad"><span>ไม่ได้</span><b id="sum-bad">0</b></div>
+      </div>
+    </div>
+    <div class="sum-table" id="sum-quiz"></div>
+    <div class="pad" id="sum-missed-wrap">
+      <p class="sum-missed-title">คำที่ยังไม่ได้</p>
+      <div class="chip-row" id="sum-missed"></div>
+    </div>
+    <div class="sum-actions">
+      <button class="btn-primary" id="retry-btn">ทบทวนคำที่ยังไม่ได้อีกรอบ</button>
+      <button class="btn-ghost" id="done-home">กลับหน้าแรก</button>
     </div>
   </section>
 
-  <!-- ADD -->
+  <!-- ============================================================ import -->
   <section class="view" id="view-add" hidden>
-    <h1>เพิ่มจากแชต</h1>
-    <p class="lead">คัดลอกคำตอบของ Claude ทั้งข้อความ แล้ววางที่นี่ แอปจะหาบล็อก JSON เอง</p>
+    <h1 class="page-title">นำเข้า</h1>
+    <p class="hint">คัดลอกคำตอบทั้งข้อความจาก Claude แล้ววางที่นี่ แอปจะหาบล็อก JSON ท้ายข้อความเอง</p>
     <textarea id="add-text" rows="7" placeholder="วางคำตอบของ Claude ที่นี่"></textarea>
-    <div class="add-actions">
-      <button class="btn-quiet" id="paste-btn">วางจากคลิปบอร์ด</button>
-      <button class="btn-quiet" id="clear-btn">ล้าง</button>
+    <div class="row-btns">
+      <button class="btn-ghost" id="paste-btn">วางจากคลิปบอร์ด</button>
+      <button class="btn-ghost" id="clear-btn">ล้าง</button>
     </div>
     <div id="add-preview"></div>
-    <button class="btn-marking" id="save-btn" hidden>บันทึกลงฐาน</button>
+    <button class="btn-primary wide" id="save-btn" hidden>บันทึกลงฐาน</button>
     <p class="hint" id="add-result"></p>
   </section>
 
-  <!-- LIBRARY -->
+  <!-- ============================================================ library -->
   <section class="view" id="view-lib" hidden>
-    <h1>คลัง</h1>
+    <h1 class="page-title">คลังคำ</h1>
     <div class="seg" role="tablist">
-      <button role="tab" class="seg-btn" data-lib="words" aria-selected="true">คำศัพท์</button>
-      <button role="tab" class="seg-btn" data-lib="patterns" aria-selected="false">Pattern</button>
-      <button role="tab" class="seg-btn" data-lib="mistakes" aria-selected="false">ที่เคยผิด</button>
+      <button class="seg-btn" data-lib="words" role="tab">คำศัพท์</button>
+      <button class="seg-btn" data-lib="patterns" role="tab">Pattern</button>
+      <button class="seg-btn" data-lib="mistakes" role="tab">ที่เคยผิด</button>
     </div>
-    <input type="search" id="lib-search" placeholder="ค้นหา" autocomplete="off">
+    <input type="search" id="lib-search" placeholder="ค้นหา" autocomplete="off" aria-label="ค้นหาในคลัง">
     <p class="hint" id="lib-count"></p>
     <ul class="lib-list" id="lib-list"></ul>
   </section>
 
-  <!-- SETTINGS -->
+  <!-- ============================================================ settings -->
   <section class="view" id="view-settings" hidden>
-    <h1>ตั้งค่า</h1>
+    <div class="page-head">
+      <button class="icon-btn" id="settings-back" aria-label="กลับ"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg></button>
+      <h1 class="page-title">ตั้งค่า</h1>
+    </div>
     <label class="field">
       <span>Web App URL</span>
       <input type="url" id="set-url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off" autocapitalize="off" spellcheck="false">
@@ -134,54 +179,25 @@
       <span>Token</span>
       <input type="password" id="set-token" placeholder="จาก Log ของ setup()" autocomplete="off" autocapitalize="off" spellcheck="false">
     </label>
-    <label class="field">
-      <span>ทิศทางการ์ด</span>
-      <select id="set-dir">
-        <option value="en">เห็นอังกฤษ ทายไทย</option>
-        <option value="th">เห็นไทย ทายอังกฤษ</option>
-      </select>
-    </label>
-    <div class="add-actions">
-      <button class="btn-marking" id="set-save">บันทึกและเชื่อมต่อ</button>
-    </div>
+    <button class="btn-primary wide" id="set-save">บันทึกและเชื่อมต่อ</button>
     <p class="hint" id="set-result"></p>
-    <details class="danger">
-      <summary>ล้างข้อมูลในเครื่อง</summary>
-      <p class="hint">ลบข้อมูลที่ sync ไว้ในเครื่องนี้ ฐานข้อมูลใน Google Sheets ไม่ถูกแตะ ผลทบทวนที่ยังไม่ได้ส่งจะหายด้วย</p>
-      <button class="btn-quiet" id="wipe-btn">ล้างข้อมูลในเครื่อง</button>
-    </details>
+    <div class="danger">
+      <p class="hint">ล้างข้อมูลในเครื่อง: ใช้เมื่อเปลี่ยนเครื่องหรือข้อมูลเพี้ยน ข้อมูลในชีตไม่หาย แต่ผลทบทวนที่ยังไม่ได้ sync จะหาย</p>
+      <button class="btn-ghost" id="wipe-btn">ล้างข้อมูลในเครื่อง</button>
+    </div>
     <p class="hint version" id="version"></p>
   </section>
 
-  <!-- detail sheet -->
   <div class="sheet" id="sheet" hidden>
     <div class="sheet-body" role="dialog" aria-modal="true">
       <button class="btn-text sheet-close" id="sheet-close">ปิด</button>
       <div id="sheet-content"></div>
     </div>
   </div>
-
   <div class="toast" id="toast" role="status" hidden></div>
 </main>
 
-<nav class="tabs" aria-label="เมนู">
-  <button class="tab" data-view="home" aria-current="page">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 21 10 3M17 21 14 3M12 5v2M12 11v2M12 17v2"/></svg>
-    <span>ทบทวน</span>
-  </button>
-  <button class="tab" data-view="add">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-    <span>เพิ่ม</span>
-  </button>
-  <button class="tab" data-view="lib">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4v16H5zM11 4h4v16h-4zM17 5l3 .8-3.6 14.5-3-.8"/></svg>
-    <span>คลัง</span>
-  </button>
-  <button class="tab" data-view="settings">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
-    <span>ตั้งค่า</span>
-  </button>
-</nav>
+<nav class="tabs" id="tabs" aria-label="เมนูหลัก"></nav>
 
 <script src="core.js"></script>
 <script src="app.js"></script>

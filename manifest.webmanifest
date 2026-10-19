@@ -1,15 +1,17 @@
 {
-  "name": "EKB English Knowledge Base",
-  "short_name": "EKB",
+  "name": "JIN",
+  "short_name": "JIN",
+  "description": "ทบทวนคำศัพท์ภาษาอังกฤษ",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#2B2F33",
-  "theme_color": "#2B2F33",
+  "background_color": "#18191B",
+  "theme_color": "#18191B",
   "lang": "th",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
