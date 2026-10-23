@@ -5,7 +5,7 @@
 var EKBCore = (function () {
   'use strict';
 
-  var SCHEMA_VERSION = '3.2';
+  var SCHEMA_VERSION = '3.3';
   var DELIM = '; ';
   var CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
   var FREQUENCY = ['High', 'Medium', 'Low'];
@@ -20,9 +20,13 @@ var EKBCore = (function () {
     Pattern_Master: ['pattern_id', 'pattern', 'category', 'cefr', 'meaning_en', 'meaning_th', 'structure', 'formality', 'notes', 'difficulty'],
     Pattern_Examples: ['example_id', 'pattern_id', 'example_en', 'example_th', 'note', 'source'],
     Mistake_Log: ['mistake_id', 'wrong_text', 'correct_text', 'error_type', 'reason_en', 'reason_th', 'pattern_id',
-      'difficulty', 'word_id', 'times_repeated', 'fixed'],
-    Learning_History: ['log_id', 'logged_at', 'word_id', 'activity', 'result', 'response_time_s', 'source', 'note']
+      'difficulty', 'word_id', 'times_repeated', 'fixed', 'rule_key'],
+    Learning_History: ['log_id', 'logged_at', 'word_id', 'activity', 'result', 'response_time_s', 'source', 'note'],
+    Pattern_Practice: ['practice_id', 'logged_at', 'pattern_id', 'sentence'],
+    Practice_Feedback: ['practice_id', 'checked_at', 'ok', 'corrected', 'feedback_th', 'rule_keys'],
+    Rule_Book: ['rule_key', 'title_th', 'explain_th', 'wrong_example', 'right_example', 'category', 'created_at']
   };
+  var RULE_CATEGORIES = ['Grammar', 'Preposition', 'Word choice', 'Spelling'];
 
   var LIST_FIELDS = ['synonym', 'antonym', 'collocation', 'word_family', 'related_expressions', 'tags'];
 
@@ -41,6 +45,11 @@ var EKBCore = (function () {
       .toLowerCase()
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  /** Rule identity: lower-case ascii slug, e.g. "Passive for things" -> "passive-for-things". */
+  function ruleKey(s) {
+    return str(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
   }
 
   /** Accepts an array or a "; " / "," separated string and returns a clean, de-duplicated array. */
@@ -149,6 +158,11 @@ var EKBCore = (function () {
         var obj = JSON.parse(body);
         if (Array.isArray(obj)) obj = { entries: obj };
         if (obj && !obj.entries && obj.type) obj = { entries: [obj] };
+        // Pattern-practice feedback: {"jin":"pattern_feedback", items, rules, mistakes}
+        if (obj && (obj.jin === 'pattern_feedback' || Array.isArray(obj.items))) {
+          obj = { ekb: obj.ekb || SCHEMA_VERSION, entries: obj.mistakes || obj.entries || [], rules: obj.rules || [], feedback: obj.items || [] };
+        }
+        if (obj && !Array.isArray(obj.entries) && Array.isArray(obj.rules)) obj.entries = [];
         if (!obj || !Array.isArray(obj.entries)) { lastErr = 'JSON ไม่มี "entries"'; continue; }
         return { ok: true, payload: obj };
       } catch (e) {
@@ -253,7 +267,8 @@ var EKBCore = (function () {
         reason_th: str(e.reason_th),
         difficulty: diff,
         times_repeated: 1,
-        fixed: 'No'
+        fixed: 'No',
+        rule_key: ruleKey(e.rule_key)
       },
       pattern_ref: str(e.pattern_ref || e.pattern_id),
       word_ref: str(e.word_ref || e.word_id)
@@ -295,7 +310,7 @@ var EKBCore = (function () {
     pe.forEach(function (r) { exampleKeys[str(r.pattern_id) + '|' + normalizeKey(r.example_en)] = true; });
     var mistakeByText = {};
     ml.forEach(function (r) {
-      mistakeByText[normalizeKey(r.wrong_text)] = { id: r.mistake_id, times: Number(r.times_repeated) || 1 };
+      mistakeByText[normalizeKey(r.wrong_text)] = { id: r.mistake_id, times: Number(r.times_repeated) || 1, rule_key: str(r.rule_key) };
     });
 
     var appends = { Knowledge_Master: [], Pattern_Master: [], Pattern_Examples: [], Mistake_Log: [] };
@@ -349,8 +364,76 @@ var EKBCore = (function () {
       return id ? { id: id } : { id: '', warning: 'ไม่พบคำ "' + ref + '" ในคลัง เลยไม่ได้ผูก' };
     }
 
+    // ---- rules (before mistakes and feedback, so both can point at them) ----
+    appends.Rule_Book = [];
+    appends.Practice_Feedback = [];
+    counts.rules = 0;
+    counts.feedback = 0;
+    var rb = db.Rule_Book || [];
+    var ruleByKey = {};
+    var ruleByTitle = {};
+    rb.forEach(function (r) {
+      var k = ruleKey(r.rule_key);
+      if (!k) return;
+      ruleByKey[k] = k;
+      ruleByTitle[normalizeKey(r.title_th)] = k;
+    });
+    var ruleAlias = {}; // key Claude wrote -> key stored in the sheet
+    function mapRule(k) {
+      var kk = ruleKey(k);
+      if (!kk) return '';
+      return ruleAlias[kk] || ruleByKey[kk] || '';
+    }
+    var rulesIn = (payload && Array.isArray(payload.rules)) ? payload.rules : [];
+    rulesIn.forEach(function (r, i) {
+      r = r || {};
+      var key = ruleKey(r.key || r.rule_key);
+      var title = str(r.title_th || r.title);
+      var item = { index: 1000 + i, type: 'rule', label: title || key, status: '', id: '', errors: [], warnings: [] };
+      report.push(item);
+      if (!key || !title) { item.status = 'invalid'; item.errors.push('กฎต้องมี key และ title_th'); counts.invalid += 1; return; }
+      // Same key, or the same title under another key, is the same rule: keep the saved one.
+      var hit = ruleByKey[key] || ruleByTitle[normalizeKey(title)];
+      if (hit) { ruleAlias[key] = hit; item.status = 'duplicate'; item.id = hit; counts.duplicate += 1; return; }
+      var cat = pickEnum(r.category, RULE_CATEGORIES);
+      if (!cat) { if (str(r.category)) item.warnings.push('category "' + r.category + '" ไม่รู้จัก ใช้ Grammar'); cat = 'Grammar'; }
+      appends.Rule_Book.push({ rule_key: key, title_th: title, explain_th: str(r.explain_th), wrong_example: str(r.wrong),
+        right_example: str(r.right), category: cat, created_at: date });
+      ruleByKey[key] = key;
+      ruleByTitle[normalizeKey(title)] = key;
+      ruleAlias[key] = key;
+      item.status = 'added'; item.id = key; counts.rules += 1;
+    });
+
+    // ---- pattern-practice feedback ----
+    var practiceIds = {};
+    (db.Pattern_Practice || []).forEach(function (r) { practiceIds[str(r.practice_id)] = r; });
+    var fbIn = (payload && Array.isArray(payload.feedback)) ? payload.feedback : [];
+    fbIn.forEach(function (f, i) {
+      f = f || {};
+      var id = str(f.id || f.practice_id);
+      var item = { index: 2000 + i, type: 'feedback', label: id, status: '', id: id, errors: [], warnings: [] };
+      report.push(item);
+      if (!practiceIds[id]) { item.status = 'invalid'; item.errors.push('ไม่พบประโยครหัส ' + (id || '-') + ' (sync ก่อนแล้ววางใหม่)'); counts.invalid += 1; return; }
+      var ok = f.ok === true || /^(yes|true|ok|correct)$/i.test(str(f.ok));
+      var keys = [];
+      (Array.isArray(f.rules) ? f.rules : toList(f.rules)).forEach(function (k) {
+        var m = mapRule(k);
+        if (!m) { if (str(k)) item.warnings.push('ไม่พบกฎ "' + k + '"'); return; }
+        if (keys.indexOf(m) < 0) keys.push(m);
+      });
+      appends.Practice_Feedback.push({ practice_id: id, checked_at: date, ok: ok ? 'Yes' : 'No', corrected: str(f.corrected),
+        feedback_th: str(f.feedback_th || f.feedback), rule_keys: keys.join(DELIM) });
+      item.label = practiceIds[id].sentence || id;
+      item.ok = ok;
+      item.corrected = str(f.corrected);
+      item.feedback_th = str(f.feedback_th || f.feedback);
+      item.rule_keys = keys;
+      item.status = 'checked'; counts.feedback += 1;
+    });
+
     var entries = (payload && Array.isArray(payload.entries)) ? payload.entries : [];
-    if (!entries.length) {
+    if (!entries.length && !rulesIn.length && !fbIn.length) {
       report.push({ index: -1, type: '-', label: '-', status: 'invalid', errors: ['ไม่มี entries'], warnings: [] });
       counts.invalid += 1;
     }
@@ -449,9 +532,18 @@ var EKBCore = (function () {
       item.label = mv.row.wrong_text;
       item.warnings = mv.warnings;
       if (mv.errors.length) { item.status = 'invalid'; item.errors = mv.errors; counts.invalid += 1; return; }
+      if (mv.row.rule_key) {
+        var mk = mapRule(mv.row.rule_key);
+        if (!mk) item.warnings.push('ไม่พบกฎ "' + mv.row.rule_key + '" เลยไม่ได้ผูก');
+        mv.row.rule_key = mk;
+      }
       var existing = mistakeByText[normalizeKey(mv.row.wrong_text)];
       if (existing) {
         existing.times += 1;
+        if (mv.row.rule_key && !existing.rule_key) {
+          updates.push({ table: 'Mistake_Log', idCol: 'mistake_id', id: existing.id, col: 'rule_key', value: mv.row.rule_key });
+          existing.rule_key = mv.row.rule_key;
+        }
         var isNewInBatch = appends.Mistake_Log.some(function (r) { return r.mistake_id === existing.id; });
         if (isNewInBatch) {
           appends.Mistake_Log.forEach(function (r) { if (r.mistake_id === existing.id) r.times_repeated = existing.times; });
@@ -467,7 +559,7 @@ var EKBCore = (function () {
       var mw = resolveWord(mv.word_ref);
       if (mw.warning) item.warnings.push(mw.warning);
       var mrow = Object.assign({ mistake_id: nextMistake() }, mv.row, { pattern_id: mp.id, word_id: mw.id });
-      mistakeByText[normalizeKey(mrow.wrong_text)] = { id: mrow.mistake_id, times: 1 };
+      mistakeByText[normalizeKey(mrow.wrong_text)] = { id: mrow.mistake_id, times: 1, rule_key: mrow.rule_key };
       appends.Mistake_Log.push(mrow);
       item.status = 'added'; item.id = mrow.mistake_id; counts.added += 1;
     });
@@ -485,7 +577,9 @@ var EKBCore = (function () {
       }
       return JSON.stringify(v === undefined ? null : v);
     }
-    var s = canon((payload && payload.entries) || []);
+    var hasMore = payload && ((payload.rules && payload.rules.length) || (payload.feedback && payload.feedback.length));
+    var s = hasMore ? canon({ entries: payload.entries || [], rules: payload.rules || [], feedback: payload.feedback || [] })
+      : canon((payload && payload.entries) || []);
     var h = 0x811c9dc5;
     for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; }
     return ('0000000' + h.toString(16)).slice(-8) + '-' + s.length;
@@ -828,6 +922,293 @@ var EKBCore = (function () {
     return makeQuizA(w, words, rng);
   }
 
+  // ---------- pattern practice (phase 2): free sentences, checked later by Claude ----------
+  var PRACTICE_INTERVALS = [3, 7, 14, 30];
+  var CHECK_CHUNK = 25;
+
+  function isYes(v) { return v === true || /^(yes|true|ok)$/i.test(str(v)); }
+
+  /** Server Pattern_Practice rows + sentences still on the phone, de-duplicated by practice_id. */
+  function mergePractice(serverRows, pending) {
+    var out = (serverRows || []).slice();
+    var have = {};
+    out.forEach(function (r) { have[str(r.practice_id)] = true; });
+    (pending || []).forEach(function (r) { if (!have[str(r.practice_id)]) { have[str(r.practice_id)] = true; out.push(r); } });
+    return out;
+  }
+
+  /** Latest feedback row per practice_id (a sentence checked twice keeps the newer result). */
+  function latestFeedback(feedbackRows) {
+    var by = {};
+    (feedbackRows || []).forEach(function (f, i) {
+      var id = str(f.practice_id);
+      if (!id) return;
+      var cur = by[id];
+      var k = String(f.checked_at || '') + '|' + pad(i, 6);
+      if (!cur || k >= cur._k) by[id] = Object.assign({ _k: k }, f);
+    });
+    return by;
+  }
+
+  /**
+   * Per-pattern state from the practice log:
+   *   new      never written
+   *   waiting  newest sentence not checked yet (not shown again until feedback arrives)
+   *   redo     newest checked sentence was wrong -> comes back every session
+   *   passed   newest checked sentence was right -> comes back after 3 / 7 / 14 / 30 days (streak)
+   */
+  function patternStates(patterns, practiceRows, feedbackRows, intervals) {
+    intervals = intervals || PRACTICE_INTERVALS;
+    var fb = latestFeedback(feedbackRows);
+    var byPattern = {};
+    (practiceRows || []).forEach(function (r) {
+      var pid = str(r.pattern_id);
+      if (!pid) return;
+      (byPattern[pid] = byPattern[pid] || []).push(r);
+    });
+    var out = {};
+    (patterns || []).forEach(function (p) {
+      var pid = str(p.pattern_id);
+      var rows = (byPattern[pid] || []).slice().sort(function (a, b) {
+        return String(a.logged_at) < String(b.logged_at) ? -1 : String(a.logged_at) > String(b.logged_at) ? 1 : 0;
+      });
+      var st = { pattern_id: pid, status: 'new', attempts: rows.length, lastPractice: '', lastFeedback: null, streak: 0, due: '', unchecked: 0 };
+      if (!rows.length) { out[pid] = st; return; }
+      st.lastPractice = String(rows[rows.length - 1].logged_at || '');
+      var checked = [];
+      rows.forEach(function (r) {
+        var f = fb[str(r.practice_id)];
+        if (f) checked.push({ row: r, fb: f }); else st.unchecked += 1;
+      });
+      var newest = rows[rows.length - 1];
+      if (!fb[str(newest.practice_id)]) { st.status = 'waiting'; }
+      if (checked.length) {
+        var last = checked[checked.length - 1];
+        st.lastFeedback = { practice_id: last.row.practice_id, sentence: last.row.sentence, ok: isYes(last.fb.ok),
+          corrected: str(last.fb.corrected), feedback_th: str(last.fb.feedback_th), rule_keys: toList(last.fb.rule_keys), checked_at: str(last.fb.checked_at) };
+        for (var i = checked.length - 1; i >= 0 && isYes(checked[i].fb.ok); i--) st.streak += 1;
+        if (st.status !== 'waiting') {
+          if (!st.lastFeedback.ok) st.status = 'redo';
+          else {
+            st.status = 'passed';
+            var day = String(last.fb.checked_at || last.row.logged_at || '').slice(0, 10);
+            st.due = day ? addDays(day, intervals[Math.min(st.streak, intervals.length) - 1]) : '';
+          }
+        }
+      }
+      out[pid] = st;
+    });
+    return out;
+  }
+
+  /**
+   * Next pattern to show. Order: redo -> new -> passed and due -> anything else, least recently practiced.
+   * shownIds: patterns already shown in this session (each comes once until every group runs dry).
+   */
+  function nextPattern(patterns, states, todayYmd, shownIds) {
+    var shown = {};
+    (shownIds || []).forEach(function (id) { shown[id] = true; });
+    var redo = [], fresh = [], due = [], rest = [];
+    (patterns || []).forEach(function (p, i) {
+      var st = states[p.pattern_id] || { status: 'new' };
+      var x = { p: p, st: st, i: i };
+      if (st.status === 'redo') redo.push(x);
+      else if (st.status === 'new') fresh.push(x);
+      else if (st.status === 'passed' && st.due && st.due <= todayYmd) due.push(x);
+      else rest.push(x);
+    });
+    redo.sort(function (a, b) { return String(a.st.lastFeedback.checked_at) < String(b.st.lastFeedback.checked_at) ? -1 : 1; });
+    due.sort(function (a, b) { return a.st.due < b.st.due ? -1 : a.st.due > b.st.due ? 1 : a.i - b.i; });
+    rest.sort(function (a, b) { return String(a.st.lastPractice) < String(b.st.lastPractice) ? -1 : String(a.st.lastPractice) > String(b.st.lastPractice) ? 1 : a.i - b.i; });
+    var groups = [['redo', redo], ['new', fresh], ['due', due], ['again', rest]];
+    for (var pass = 0; pass < 2; pass++) {
+      for (var g = 0; g < groups.length; g++) {
+        var list = groups[g][1];
+        for (var j = 0; j < list.length; j++) {
+          if (pass === 0 && shown[list[j].p.pattern_id]) continue;
+          return { pattern: list[j].p, state: list[j].st, reason: groups[g][0] };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Counts for the home screen. */
+  function practiceSummary(patterns, states, practiceRows, feedbackRows, todayYmd) {
+    var fb = latestFeedback(feedbackRows);
+    var unchecked = (practiceRows || []).filter(function (r) { return !fb[str(r.practice_id)]; }).length;
+    var redo = 0, fresh = 0, due = 0;
+    (patterns || []).forEach(function (p) {
+      var st = states[p.pattern_id];
+      if (!st) return;
+      if (st.status === 'redo') redo += 1;
+      if (st.status === 'new') fresh += 1;
+      if (st.status === 'passed' && st.due <= todayYmd) due += 1;
+    });
+    return { unchecked: unchecked, redo: redo, fresh: fresh, due: due };
+  }
+
+  /**
+   * Text to paste into Claude: every unchecked sentence, split into chunks of 25.
+   * Returns [{text, ids}] (one entry per chunk).
+   */
+  function buildCheckText(practiceRows, feedbackRows, patterns, rules, chunkSize) {
+    chunkSize = chunkSize || CHECK_CHUNK;
+    var fb = latestFeedback(feedbackRows);
+    var pById = {};
+    (patterns || []).forEach(function (p) { pById[p.pattern_id] = p; });
+    var todo = (practiceRows || []).filter(function (r) { return !fb[str(r.practice_id)] && str(r.sentence); })
+      .slice().sort(function (a, b) { return String(a.logged_at) < String(b.logged_at) ? -1 : 1; });
+    if (!todo.length) return [];
+    var ruleLines = (rules || []).filter(function (r) { return ruleKey(r.rule_key); }).map(function (r) {
+      return '- ' + ruleKey(r.rule_key) + ' | ' + str(r.title_th);
+    });
+    var chunks = [];
+    for (var at = 0; at < todo.length; at += chunkSize) chunks.push(todo.slice(at, at + chunkSize));
+    return chunks.map(function (list, ci) {
+      var lines = [];
+      lines.push('JIN · ตรวจประโยคฝึก Pattern' + (chunks.length > 1 ? ' (ชุด ' + (ci + 1) + '/' + chunks.length + ')' : '') + ' · ' + list.length + ' ประโยค');
+      lines.push('ใช้ skill jin-pattern-check ตรวจทุกประโยค (ถ้าไม่มี skill: บอกว่าแต่ละประโยคถูกแกรมม่าและใช้ pattern ถูกไหม อธิบายเป็นไทย แล้วปิดท้ายด้วย JSON {"jin":"pattern_feedback","items":[{"id","ok","corrected","feedback_th","rules":[]}],"rules":[],"mistakes":[]})');
+      lines.push('');
+      list.forEach(function (r) {
+        var p = pById[r.pattern_id] || {};
+        lines.push('[' + r.practice_id + '] ' + (p.pattern || r.pattern_id) + (p.meaning_th ? ' — ' + p.meaning_th : ''));
+        String(r.sentence).split(/\r?\n/).forEach(function (l) { if (str(l)) lines.push('> ' + str(l)); });
+        lines.push('');
+      });
+      lines.push('กฎที่มีอยู่แล้ว (ใช้ key เดิมถ้าเป็นเรื่องเดียวกัน):');
+      lines.push(ruleLines.length ? ruleLines.join('\n') : '- (ยังไม่มี)');
+      return { text: lines.join('\n'), ids: list.map(function (r) { return r.practice_id; }) };
+    });
+  }
+
+  /** New practice id, readable and unique enough across devices: PP-YYMMDD-xxxxx. */
+  function newPracticeId(todayYmd, rnd) {
+    var r = rnd || Math.random;
+    var s = '';
+    for (var i = 0; i < 5; i++) s += '0123456789abcdefghijkmnpqrstuvwxyz'.charAt(Math.floor(r() * 34));
+    return 'PP-' + String(todayYmd).replace(/-/g, '').slice(2) + '-' + s;
+  }
+
+  /**
+   * Rules sorted by how often Gap breaks them: practice feedback rows (latest per sentence) + Mistake_Log rows
+   * (times_repeated) that point at the rule. Ties: most recently broken first.
+   */
+  function ruleStats(rules, feedbackRows, mistakes, practiceRows) {
+    var fb = latestFeedback(feedbackRows);
+    var sentenceById = {};
+    (practiceRows || []).forEach(function (r) { sentenceById[str(r.practice_id)] = r; });
+    var stat = {};
+    (rules || []).forEach(function (r) {
+      var k = ruleKey(r.rule_key);
+      if (k) stat[k] = { rule: r, key: k, count: 0, last: '', examples: [] };
+    });
+    Object.keys(fb).forEach(function (id) {
+      var f = fb[id];
+      toList(f.rule_keys).forEach(function (k) {
+        var s = stat[ruleKey(k)];
+        if (!s) return;
+        s.count += 1;
+        if (String(f.checked_at) > s.last) s.last = String(f.checked_at);
+        var src = sentenceById[id];
+        s.examples.push({ wrong: src ? str(src.sentence) : '', right: str(f.corrected), note: str(f.feedback_th), when: str(f.checked_at) });
+      });
+    });
+    (mistakes || []).forEach(function (m) {
+      var s = stat[ruleKey(m.rule_key)];
+      if (!s) return;
+      s.count += Number(m.times_repeated) || 1;
+      s.examples.push({ wrong: str(m.wrong_text), right: str(m.correct_text), note: str(m.reason_th), when: '' });
+    });
+    return Object.keys(stat).map(function (k) { return stat[k]; }).sort(function (a, b) {
+      return b.count - a.count || (a.last < b.last ? 1 : a.last > b.last ? -1 : 0) || (a.key < b.key ? -1 : 1);
+    });
+  }
+
+  // ---------- collocation quiz (type C) ----------
+  var LIGHT_VERBS = ['make', 'do', 'take', 'have', 'give', 'get', 'pay', 'keep', 'hold', 'catch', 'set', 'put', 'run', 'go',
+    'come', 'bring', 'break', 'raise', 'draw', 'reach'];
+
+  function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  /** Usable collocation items for a word: light-verb ("take a sip") or head-word ("a lively discussion"). */
+  function collocItems(word) {
+    var out = [];
+    var head = str(word.word);
+    if (!head) return out;
+    var headRe = new RegExp('(^|[^A-Za-z])(' + escapeRe(head) + ')(?![A-Za-z])', 'i');
+    splitCollocation(word.collocation).plain.forEach(function (c) {
+      if (/[\/()…]|\.\.\./.test(c)) return; // "offer/send", "(sb)": too ambiguous to blank
+      var toks = c.split(/\s+/);
+      if (toks.length < 2) return;
+      var first = toks[0].toLowerCase();
+      if (LIGHT_VERBS.indexOf(first) >= 0 && head.toLowerCase().split(/\s+/)[0] !== first) {
+        out.push({ kind: 'verb', full: c, prompt: '___ ' + toks.slice(1).join(' '), answer: first });
+        return;
+      }
+      var m = headRe.exec(c);
+      if (m && normalizeKey(c) !== normalizeKey(head)) {
+        var at = m.index + m[1].length;
+        out.push({ kind: 'head', full: c, prompt: c.slice(0, at) + '___' + c.slice(at + m[2].length), answer: c.substr(at, m[2].length) });
+      }
+    });
+    return out;
+  }
+
+  function makeQuizC(word, words, rng) {
+    rng = rng || Math.random;
+    var items = collocItems(word);
+    if (!items.length) return null;
+    var verbs = items.filter(function (x) { return x.kind === 'verb'; });
+    var heads = items.filter(function (x) { return x.kind === 'head'; });
+    var pickFrom = (verbs.length && (!heads.length || rng() < 0.5)) ? verbs : heads;
+    var it = pickFrom[Math.floor(rng() * pickFrom.length)];
+    var opts = [it.answer.toLowerCase()];
+    if (it.kind === 'verb') {
+      shuffle(LIGHT_VERBS, rng).forEach(function (v) { if (opts.length < 4 && opts.indexOf(v) < 0) opts.push(v); });
+    } else {
+      var key = posKey(word.pos);
+      var multi = /\s/.test(str(word.word));
+      var pool = (words || []).filter(function (w) {
+        return w.word_id !== word.word_id && posKey(w.pos) === key && /\s/.test(str(w.word)) === multi && !/[\/()]/.test(str(w.word));
+      });
+      if (pool.length < 3) pool = (words || []).filter(function (w) { return w.word_id !== word.word_id && str(w.word); });
+      shuffle(pool, rng).forEach(function (w) {
+        var v = str(w.word).toLowerCase();
+        if (opts.length < 4 && opts.indexOf(v) < 0) opts.push(v);
+      });
+    }
+    return { type: 'C', kind: it.kind, word: word, prompt: it.prompt, answer: it.answer.toLowerCase(), full: it.full, options: shuffle(opts, rng) };
+  }
+
+  /**
+   * Quiz between cards, rotating Preposition (B) -> Collocation (C) -> part of speech + meaning (A).
+   * turn = how many quizzes this round already had; types that cannot be made are skipped.
+   */
+  function pickQuizTurn(words, history, excludeIds, turn, rng) {
+    rng = rng || Math.random;
+    var pool = quizEligible(words, history, excludeIds);
+    if (!pool.length) return null;
+    var order = ['B', 'C', 'A'];
+    for (var k = 0; k < 3; k++) {
+      var type = order[(turn + k) % 3];
+      var cands;
+      if (type === 'B') cands = pool.filter(function (w) { return splitCollocation(w.collocation).preps.length > 0; });
+      else if (type === 'C') cands = pool.filter(function (w) { return collocItems(w).length > 0; });
+      else cands = pool;
+      if (!cands.length) continue;
+      var w = cands[Math.floor(rng() * cands.length)];
+      var q = type === 'B' ? makeQuizB(w, rng) : type === 'C' ? makeQuizC(w, words, rng) : makeQuizA(w, words, rng);
+      if (q) return q;
+    }
+    return null;
+  }
+
+  /** Splits a pattern structure "S + be + supposed to + V1" into chips. */
+  function structureChips(structure) {
+    return str(structure).split(/\s+\+\s+/).map(str).filter(Boolean);
+  }
+
   return {
     SCHEMA_VERSION: SCHEMA_VERSION,
     DELIM: DELIM,
@@ -863,7 +1244,24 @@ var EKBCore = (function () {
     quizEligible: quizEligible,
     makeQuizA: makeQuizA,
     makeQuizB: makeQuizB,
-    pickQuiz: pickQuiz
+    pickQuiz: pickQuiz,
+    ruleKey: ruleKey,
+    RULE_CATEGORIES: RULE_CATEGORIES,
+    PRACTICE_INTERVALS: PRACTICE_INTERVALS,
+    CHECK_CHUNK: CHECK_CHUNK,
+    mergePractice: mergePractice,
+    latestFeedback: latestFeedback,
+    patternStates: patternStates,
+    nextPattern: nextPattern,
+    practiceSummary: practiceSummary,
+    buildCheckText: buildCheckText,
+    newPracticeId: newPracticeId,
+    ruleStats: ruleStats,
+    collocItems: collocItems,
+    makeQuizC: makeQuizC,
+    pickQuizTurn: pickQuizTurn,
+    structureChips: structureChips,
+    LIGHT_VERBS: LIGHT_VERBS
   };
 })();
 

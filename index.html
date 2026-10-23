@@ -59,8 +59,27 @@
       </button>
     </div>
 
-    <!-- later phases put dungeon / homework / rules / practice cards here -->
-    <div id="home-slots"></div>
+    <!-- later phases can add more cards here (dungeon) -->
+    <div id="home-practice" hidden>
+      <div class="practice-row">
+        <button class="pattern-btn" id="pattern-btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="5" height="6" rx="1"></rect><rect x="9.5" y="9" width="5" height="6" rx="1"></rect><rect x="16" y="9" width="5" height="6" rx="1"></rect></svg>
+          <span class="pb-text"><span class="pb-title">ฝึก Pattern</span><span class="pb-sub" id="pattern-sub"></span></span>
+        </button>
+        <button class="check-btn" id="check-btn" hidden>
+          <span class="check-badge" id="check-count">0</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 12l3 3 5-6"></path></svg>
+          <span>ส่งตรวจ</span>
+        </button>
+      </div>
+      <div class="rules-box" id="rules-box" hidden>
+        <div class="rules-box-head">
+          <span class="rules-box-title"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 16H3z"></path><path d="M12 10v4"></path><path d="M12 17h.01"></path></svg>กฎที่ผิดบ่อย</span>
+          <button class="btn-text" id="rules-all">ดูทั้งหมด</button>
+        </div>
+        <div id="rules-top"></div>
+      </div>
+    </div>
 
     <p class="sync-line"><span id="sync-status">ยังไม่เคย sync</span> <span id="sync-pending" class="sync-pending"></span></p>
   </section>
@@ -110,6 +129,49 @@
     </div>
     <div class="quiz-body" id="quiz-body"></div>
     <div class="quiz-foot" id="quiz-foot"></div>
+  </section>
+
+  <!-- ============================================================ pattern practice -->
+  <section class="view view-fixed" id="view-pattern" hidden>
+    <div class="review-top">
+      <span class="pat-badge"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="5" height="6" rx="1"></rect><rect x="9.5" y="9" width="5" height="6" rx="1"></rect><rect x="16" y="9" width="5" height="6" rx="1"></rect></svg>ฝึก PATTERN</span>
+      <span class="reviewed">แต่งแล้ว <b id="pat-written">0</b></span>
+      <button class="end-btn" id="pat-end">จบรอบ</button>
+    </div>
+    <div class="pat-scroll" id="pat-scroll">
+      <div id="pat-body"></div>
+      <label class="pat-label" for="pat-answer">แต่งประโยคของคุณเองด้วย Pattern นี้</label>
+      <textarea id="pat-answer" rows="4" placeholder="พิมพ์ประโยคภาษาอังกฤษ... แต่งกี่ประโยคก็ได้" autocapitalize="sentences" spellcheck="false"></textarea>
+      <p class="hint pat-info">ประโยคจะเก็บเข้าคลังไว้ ส่งให้ Claude ตรวจทีเดียวตอนไหนก็ได้ ไม่มีคะแนน ถ้าผิด Pattern นี้จะกลับมาให้แต่งใหม่</p>
+    </div>
+    <div class="pat-actions">
+      <button class="btn-ghost" id="pat-skip">ข้าม</button>
+      <button class="btn-primary" id="pat-save" disabled>เก็บ + ถัดไป</button>
+    </div>
+  </section>
+
+  <!-- ============================================================ send to Claude -->
+  <section class="view" id="view-check" hidden>
+    <div class="page-head">
+      <button class="icon-btn" id="check-back" aria-label="กลับ"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg></button>
+      <div><h1 class="page-title">ส่งตรวจ</h1><p class="hint" id="check-total"></p></div>
+    </div>
+    <div id="check-steps">
+      <div class="step"><span class="step-n">1</span><span class="step-t">คัดลอกไปวางในแชต Claude</span></div>
+      <div class="check-buttons" id="check-buttons"></div>
+      <div class="step"><span class="step-n muted">2</span><span class="step-t">คัดลอกคำตอบของ Claude ทั้งหมด แล้ววางที่หน้านำเข้า</span></div>
+      <button class="btn-ghost wide" id="check-import">ไปหน้านำเข้า</button>
+      <h2 class="sec-h">ประโยครอตรวจ</h2>
+      <ul class="check-list" id="check-list"></ul>
+    </div>
+  </section>
+
+  <!-- ============================================================ rules -->
+  <section class="view" id="view-rules" hidden>
+    <h1 class="page-title">กฎที่ต้องระวัง</h1>
+    <p class="hint">สรุปจากผลตรวจของ Claude · เรียงจากผิดบ่อยสุด</p>
+    <div class="fchips" id="rules-filter"></div>
+    <ul class="rules-list" id="rules-list"></ul>
   </section>
 
   <!-- ============================================================ summary -->

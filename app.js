@@ -1,7 +1,7 @@
 /* JIN review app. Vanilla JS, offline-first. Data lives in IndexedDB; the Google Sheet is the source of truth. */
 (function () {
   'use strict';
-  var APP_VERSION = '2.0.1';
+  var APP_VERSION = '2.1.0';
   var $ = function (id) { return document.getElementById(id); };
   var C = EKBCore;
 
@@ -16,6 +16,7 @@
   var TABS = [
     { view: 'home', label: 'หน้าแรก', icon: 'home' },
     { view: 'add', label: 'นำเข้า', icon: 'import' },
+    { view: 'rules', label: 'กฎ', icon: 'rules' },
     { view: 'lib', label: 'คลังคำ', icon: 'book' }
   ];
   var SVG = {
@@ -25,6 +26,7 @@
     right: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="M13 6l6 6-6 6"></path></svg>',
     up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"></path><path d="M6 11l6-6 6 6"></path></svg>',
     flip: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>',
+    copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M4 16V6a2 2 0 0 1 2-2h10"></path></svg>',
     bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6"></path><path d="M10 21h4"></path><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"></path></svg>'
   };
   var RESULT_UI = {
@@ -70,6 +72,8 @@
     data: null,          // {config, tables, exported_at}
     pending: [],         // review/quiz events not yet confirmed by an export
     pendingIngest: [],   // pasted payloads waiting for a connection
+    pendingPractice: [], // pattern-practice sentences not yet confirmed by an export
+    patternRound: null,  // {startedAt, shown:[], written, current}
     lastSync: '',
     session: null,       // the round in progress (also saved in IndexedDB)
     summary: null,       // the round just ended
@@ -94,6 +98,17 @@
   function indexWords() { byId = {}; words().forEach(function (w) { byId[w.word_id] = w; }); }
   /** Server history plus everything still on this phone. Every SRS / queue / today number uses this. */
   function fullHistory() { return C.mergeHistory(tables().Learning_History || [], S.pending); }
+  function patterns() { return tables().Pattern_Master || []; }
+  function practiceRows() { return C.mergePractice(tables().Pattern_Practice || [], S.pendingPractice); }
+  function feedbackRows() { return tables().Practice_Feedback || []; }
+  function patternStates() { return C.patternStates(patterns(), practiceRows(), feedbackRows()); }
+  function ruleList() { return C.ruleStats(tables().Rule_Book || [], feedbackRows(), tables().Mistake_Log || [], practiceRows()); }
+  function ruleTitle(key) {
+    var r = (tables().Rule_Book || []).filter(function (x) { return C.ruleKey(x.rule_key) === key; })[0];
+    return r ? r.title_th : key;
+  }
+  /** Pattern practice and rules need the 3.3 sheets (run migrate_3_3 once). */
+  function hasPhase2() { return Number(config().schema_version) >= 3.3; }
   function quizEvery() {
     var v = config().quiz_every;
     if (v === undefined || v === null || v === '') return 6;
@@ -114,6 +129,7 @@
     return Promise.all([
       idb.set('pending', S.pending),
       idb.set('pendingIngest', S.pendingIngest),
+      idb.set('pendingPractice', S.pendingPractice),
       idb.set('settings', S.settings),
       idb.set('lastSync', S.lastSync)
     ]);
@@ -123,7 +139,7 @@
     var s = S.session;
     return idb.set('session', {
       id: s.id, day: s.day, startedAt: s.startedAt, mode: s.mode, queue: s.queue, i: s.i, answers: s.answers,
-      retried: s.retried, quizzes: s.quizzes, sinceQuiz: s.sinceQuiz
+      retried: s.retried, quizzes: s.quizzes, sinceQuiz: s.sinceQuiz, quizTurn: s.quizTurn || 0
     }).catch(function () {});
   }
 
@@ -181,6 +197,17 @@
         });
       });
     });
+    var practiceSkipped = [];
+    var sentPractice = S.pendingPractice.slice();
+    for (var pa = 0; pa < sentPractice.length; pa += 200) {
+      (function (batch) {
+        chain = chain.then(function () {
+          return call('log_practice', { rows: batch }).then(function (r) {
+            practiceSkipped = practiceSkipped.concat(r.skipped_ids || []);
+          });
+        });
+      })(sentPractice.slice(pa, pa + 200));
+    }
     var sent = S.pending.slice();
     for (var at = 0; at < sent.length; at += 500) {
       (function (batch) {
@@ -197,6 +224,10 @@
         S.data = { config: r.config, tables: r.tables, exported_at: r.exported_at };
         indexWords();
         S.pending = C.prunePending(S.pending, r.tables.Learning_History || [], skipped);
+        var onServer = {};
+        (r.tables.Pattern_Practice || []).forEach(function (x) { onServer[x.practice_id] = true; });
+        practiceSkipped.forEach(function (id) { onServer[id] = true; });
+        S.pendingPractice = S.pendingPractice.filter(function (x) { return !onServer[x.practice_id]; });
         S.lastSync = nowIso();
         return idb.set('data', S.data).then(persist);
       })
@@ -230,18 +261,20 @@
   }
   function show(view) {
     current = view;
-    ['home', 'review', 'quiz', 'done', 'add', 'lib', 'settings'].forEach(function (v) { $('view-' + v).hidden = v !== view; });
-    var tabView = (view === 'done' || view === 'settings') ? 'home' : view;
+    ['home', 'review', 'quiz', 'done', 'add', 'lib', 'settings', 'pattern', 'check', 'rules'].forEach(function (v) { $('view-' + v).hidden = v !== view; });
+    var tabView = (view === 'done' || view === 'settings' || view === 'check') ? 'home' : view;
     document.querySelectorAll('.tab').forEach(function (t) {
       if (t.dataset.view === tabView) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
     });
-    var immersive = view === 'review' || view === 'quiz';
+    var immersive = view === 'review' || view === 'quiz' || view === 'pattern';
     $('tabs').hidden = immersive;
     document.body.classList.toggle('no-scroll', immersive);
     window.scrollTo(0, 0);
     if (view === 'home') renderHome();
     if (view === 'lib') renderLib();
     if (view === 'settings') renderSettings();
+    if (view === 'rules') renderRules();
+    if (view === 'check') renderCheck();
   }
 
   // ---------------------------------------------------------------- home
@@ -250,6 +283,7 @@
     var pend = [];
     if (S.pending.length) pend.push('· รอส่ง ' + S.pending.length + ' รายการ');
     if (S.pendingIngest.length) pend.push('· ชุดคำรอส่ง ' + S.pendingIngest.length);
+    if (S.pendingPractice.length) pend.push('· ประโยครอส่ง ' + S.pendingPractice.length);
     $('sync-pending').textContent = pend.join(' ');
   }
 
@@ -268,13 +302,46 @@
     $('start-btn').disabled = !S.data || !ws.length;
     $('start-sub').textContent = !S.data ? 'กด Sync หรือไปที่ตั้งค่าเพื่อเชื่อมฐานข้อมูล'
       : 'ครบกำหนด ' + q.dueTotal + ' คำ · พอเมื่อไหร่กดจบรอบ';
+    renderHomePractice();
     renderSyncLine();
+  }
+
+  function renderHomePractice() {
+    var pats = patterns();
+    var ready = !!S.data && pats.length && hasPhase2();
+    $('home-practice').hidden = !S.data;
+    if (!S.data) return;
+    if (!hasPhase2()) {
+      $('pattern-sub').textContent = 'ต้องรัน migrate_3_3 ใน Apps Script ก่อน';
+      $('pattern-btn').disabled = true;
+      $('check-btn').hidden = true;
+      $('rules-box').hidden = true;
+      return;
+    }
+    $('pattern-btn').disabled = !ready;
+    var sum = C.practiceSummary(pats, patternStates(), practiceRows(), feedbackRows(), today());
+    var bits = [];
+    if (sum.unchecked) bits.push('รอตรวจ ' + sum.unchecked + ' ประโยค');
+    if (sum.redo) bits.push('ต้องแต่งซ้ำ ' + sum.redo);
+    if (!bits.length) bits.push(sum.fresh ? 'Pattern ใหม่ ' + sum.fresh + ' ตัว' : 'แต่งได้เรื่อยๆ จนกดจบรอบ');
+    $('pattern-sub').textContent = bits.join(' · ');
+    $('check-btn').hidden = !sum.unchecked;
+    $('check-count').textContent = sum.unchecked;
+    var rl = ruleList().filter(function (r) { return r.count > 0; });
+    $('rules-box').hidden = !rl.length;
+    $('rules-all').textContent = 'ดูทั้งหมด ' + ruleList().length;
+    $('rules-top').innerHTML = rl.slice(0, 2).map(function (r) {
+      var ex = r.rule.wrong_example || r.rule.right_example
+        ? '<span class="rule-ex">' + (r.rule.wrong_example ? '<s>' + esc(r.rule.wrong_example) + '</s> → ' : '') + '<b>' + esc(r.rule.right_example) + '</b> · ผิด ' + r.count + ' ครั้ง</span>'
+        : '<span class="rule-ex">ผิด ' + r.count + ' ครั้ง</span>';
+      return '<div class="rule-mini"><span class="rule-mini-title">' + esc(r.rule.title_th) + '</span>' + ex + '</div>';
+    }).join('');
   }
 
   // ---------------------------------------------------------------- review round
   function newSession(ids, mode) {
     return { id: uid(), day: today(), startedAt: Date.now(), mode: mode || 'normal', queue: ids, i: 0, answers: [],
-      retried: {}, quizzes: { A: { n: 0, ok: 0 }, B: { n: 0, ok: 0 } }, sinceQuiz: 0 };
+      retried: {}, quizzes: { A: { n: 0, ok: 0 }, B: { n: 0, ok: 0 }, C: { n: 0, ok: 0 } }, sinceQuiz: 0, quizTurn: 0 };
   }
 
   function startSession() {
@@ -452,8 +519,8 @@
     var every = quizEvery();
     if (every > 0 && s.sinceQuiz >= every) {
       s.sinceQuiz = 0;
-      var quiz = C.pickQuiz(words(), fullHistory(), [w.word_id]);
-      if (quiz) { showQuiz(quiz); return; }
+      var quiz = C.pickQuizTurn(words(), fullHistory(), [w.word_id], s.quizTurn || 0);
+      if (quiz) { s.quizTurn = (s.quizTurn || 0) + 1; saveSession(); showQuiz(quiz); return; }
     }
     renderCard();
   }
@@ -586,8 +653,8 @@
     return n <= 0 ? 'คำที่ท่องผ่านมาวันนี้' : 'คำที่ท่องผ่านมาเมื่อ ' + n + ' วันก่อน';
   }
   function showQuiz(q) {
-    QZ = { q: q, shownAt: Date.now(), pos: null, mean: null, prep: null };
-    $('quiz-title').textContent = q.type === 'B' ? 'ทาย Preposition' : 'คำถามแทรก';
+    QZ = { q: q, shownAt: Date.now(), pos: null, mean: null, prep: null, col: null };
+    $('quiz-title').textContent = q.type === 'B' ? 'ทาย Preposition' : q.type === 'C' ? 'Collocation' : 'คำถามแทรก';
     $('quiz-reviewed').textContent = reviewedCount();
     show('quiz');
     renderQuiz();
@@ -603,7 +670,25 @@
     var w = q.word;
     var body = '';
     var foot = '';
-    if (q.type === 'A') {
+    if (q.type === 'C') {
+      var cdone = QZ.col !== null;
+      var shown = esc(q.prompt).replace('___', cdone ? '<span class="qc-fill">' + esc(q.answer) + '</span>' : '<span class="qc-blank" aria-label="ช่องว่าง">___</span>');
+      body += '<div class="qb-prompt"><span class="q-sub">' + (q.kind === 'verb' ? 'ใช้กริยาตัวไหนคู่กัน?' : 'คำไหนเติมแล้วเป็นวลีที่ใช้จริง?') + '</span>' +
+        '<span class="qc-line">' + shown + '</span>' +
+        (q.kind === 'verb' ? '<span class="qb-mean">' + esc(q.word.word) + ' = ' + esc(q.word.meaning_th) + '</span>' : '') + '</div>';
+      body += '<div class="qb-opts">' + q.options.map(function (o) {
+        var isAns = o === q.answer;
+        var picked = QZ.col === o;
+        var mark = cdone && isAns ? SVG.tick : (cdone && picked ? SVG.cross : '');
+        return '<button class="qc-opt' + markClass(isAns, picked, cdone) + '" data-col="' + esc(o) + '"' + (cdone ? ' disabled' : '') +
+          ' aria-label="' + esc(o) + (cdone && isAns ? ' (คำตอบที่ถูก)' : (cdone && picked ? ' (ผิด)' : '')) + '">' + mark + esc(o) + '</button>';
+      }).join('') + '</div>';
+      if (cdone) {
+        foot = '<div class="q-result ' + (QZ.col === q.answer ? 'ok' : 'no') + '"><div class="q-result-text"><span class="q-result-title">' +
+          (QZ.col === q.answer ? 'ถูกต้อง' : 'ยังไม่ใช่ คำตอบคือ ' + esc(q.answer)) + '</span><span class="q-result-ex"><b>' + esc(q.full) + '</b> · ' +
+          esc(q.word.word) + ' = ' + esc(q.word.meaning_th) + '</span></div><button class="q-next" id="quiz-next">ไปต่อ</button></div>';
+      }
+    } else if (q.type === 'A') {
       body += '<div class="q-word"><span class="q-sub">' + esc(daysAgoText(w.word_id)) + '</span><span class="q-big">' + esc(w.word) + '</span>' +
         (w.ipa ? '<span class="q-ipa">' + esc(w.ipa) + '</span>' : '') + '</div>';
       body += '<div class="q-block"><span class="q-label">1. เป็นคำประเภทไหน?</span><div class="pos-opts">' + q.posOptions.map(function (k) {
@@ -668,17 +753,21 @@
     } else if (b.dataset.mean !== undefined && QZ.mean === null) {
       QZ.mean = q.meaningOptions[Number(b.dataset.mean)];
       logEvent(q.word.word_id, 'quiz_meaning', QZ.mean === q.meaningAnswer ? 'Correct' : 'Wrong', QZ.shownAt);
+    } else if (b.dataset.col && QZ.col === null) {
+      QZ.col = b.dataset.col;
+      logEvent(q.word.word_id, 'quiz_colloc', QZ.col === q.answer ? 'Correct' : 'Wrong', QZ.shownAt);
     } else if (b.dataset.prep && QZ.prep === null) {
       QZ.prep = b.dataset.prep;
       logEvent(q.word.word_id, 'quiz_prep', QZ.prep === q.answer ? 'Correct' : 'Wrong', QZ.shownAt);
     } else {
       return;
     }
-    var finished = q.type === 'A' ? (QZ.pos !== null && QZ.mean !== null) : QZ.prep !== null;
+    var finished = q.type === 'A' ? (QZ.pos !== null && QZ.mean !== null) : q.type === 'C' ? QZ.col !== null : QZ.prep !== null;
     if (finished && S.session) {
-      var box = S.session.quizzes[q.type];
+      var box = S.session.quizzes[q.type] = S.session.quizzes[q.type] || { n: 0, ok: 0 };
       box.n += 1;
-      if (q.type === 'A' ? (QZ.pos === q.posAnswer && QZ.mean === q.meaningAnswer) : QZ.prep === q.answer) box.ok += 1;
+      var right = q.type === 'A' ? (QZ.pos === q.posAnswer && QZ.mean === q.meaningAnswer) : q.type === 'C' ? QZ.col === q.answer : QZ.prep === q.answer;
+      if (right) box.ok += 1;
       saveSession();
     }
     renderQuiz();
@@ -729,6 +818,7 @@
     var rows = '';
     if (m.quizzes.A.n) rows += '<div class="sum-row"><span>คำถามแทรก (ประเภท + ความหมาย)</span><b>' + m.quizzes.A.ok + ' / ' + m.quizzes.A.n + '</b></div>';
     if (m.quizzes.B.n) rows += '<div class="sum-row"><span>ทาย Preposition</span><b>' + m.quizzes.B.ok + ' / ' + m.quizzes.B.n + '</b></div>';
+    if (m.quizzes.C && m.quizzes.C.n) rows += '<div class="sum-row"><span>Collocation</span><b>' + m.quizzes.C.ok + ' / ' + m.quizzes.C.n + '</b></div>';
     $('sum-quiz').innerHTML = rows;
     $('sum-missed-wrap').hidden = !m.missed.length;
     $('retry-btn').hidden = !m.missed.length;
@@ -760,10 +850,183 @@
     renderCard();
   }
 
+  // ---------------------------------------------------------------- pattern practice (free sentences, no score)
+  var REASON_UI = {
+    redo: { cls: 'bad', label: 'ต้องแต่งซ้ำ' },
+    'new': { cls: 'new', label: 'Pattern ใหม่' },
+    due: { cls: 'good', label: 'ถึงรอบทบทวน' },
+    again: { cls: 'plain', label: 'ฝึกซ้ำ' }
+  };
+  var VERB_SLOT = /(^|[^A-Za-z])V(1|2|3|-ing|-ed)?([^A-Za-z]|$)/;
+  var PLACEHOLDER = /^(S\d?|O|N|noun.*|adj.*|adv.*|clause.*|agent|aux|.*\.\.\..*|\(.*\))\??$/;
+
+  function chipHtml(c) {
+    var t = c.trim();
+    var cls = VERB_SLOT.test(t) ? 'chip-v' : PLACEHOLDER.test(t) ? 'chip-ph' : 'chip-fix';
+    return '<span class="pchip ' + cls + '">' + esc(t) + '</span>';
+  }
+
+  function startPatternRound() {
+    if (!hasPhase2() || !patterns().length) return;
+    S.patternRound = { startedAt: Date.now(), shown: [], written: 0, current: null };
+    show('pattern');
+    nextPatternCard();
+  }
+
+  function nextPatternCard() {
+    var r = S.patternRound;
+    var pick = C.nextPattern(patterns(), patternStates(), today(), r.shown);
+    r.current = pick;
+    if (pick) r.shown.push(pick.pattern.pattern_id);
+    renderPatternCard();
+  }
+
+  function renderPatternCard() {
+    var r = S.patternRound;
+    $('pat-written').textContent = r.written;
+    var pick = r.current;
+    if (!pick) { $('pat-body').innerHTML = '<p class="hint">ยังไม่มี Pattern ในคลัง</p>'; return; }
+    var p = pick.pattern;
+    var st = pick.state;
+    var ex = (tables().Pattern_Examples || []).filter(function (x) { return x.pattern_id === p.pattern_id; });
+    var reason = REASON_UI[pick.reason] || REASON_UI.again;
+    var html = '<div class="pat-head"><span class="pat-reason ' + reason.cls + '">' + reason.label + '</span>' +
+      (p.cefr ? '<span class="pat-cefr">' + esc(p.cefr) + '</span>' : '') + '</div>' +
+      '<h2 class="pat-title">' + esc(p.pattern) + '</h2>' +
+      (p.meaning_th ? '<p class="pat-mean">' + esc(p.meaning_th) + '</p>' : '') +
+      (p.structure ? '<div class="pat-chips">' + C.structureChips(p.structure).map(chipHtml).join('') + '</div>' : '') +
+      (p.notes ? '<p class="pat-notes">' + esc(p.notes) + '</p>' : '');
+    if (ex.length) {
+      var e = ex[0];
+      html += '<div class="pat-example"><span class="en">' + esc(e.example_en) + '</span>' + (e.example_th ? '<span class="th">' + esc(e.example_th) + '</span>' : '') + '</div>';
+    }
+    if (st && st.lastFeedback && !st.lastFeedback.ok) {
+      var f = st.lastFeedback;
+      html += '<div class="pat-last"><span class="pat-last-title">ครั้งก่อนยังผิด</span>' +
+        '<span class="pat-last-wrong">' + esc(f.sentence) + '</span>' +
+        (f.corrected ? '<span class="pat-last-right">' + esc(f.corrected) + '</span>' : '') +
+        (f.feedback_th ? '<span class="pat-last-note">' + esc(f.feedback_th) + '</span>' : '') +
+        (f.rule_keys.length ? '<span class="pat-last-rules">' + f.rule_keys.map(function (k) { return esc(ruleTitle(k)); }).join(' · ') + '</span>' : '') +
+        '</div>';
+    }
+    $('pat-body').innerHTML = html;
+    $('pat-answer').value = '';
+    $('pat-save').disabled = true;
+    $('pat-scroll').scrollTop = 0;
+  }
+
+  function savePatternSentence() {
+    var r = S.patternRound;
+    var text = $('pat-answer').value.trim();
+    if (!r || !r.current || !text) return;
+    S.pendingPractice.push({
+      practice_id: C.newPracticeId(today()),
+      logged_at: nowIso(),
+      pattern_id: r.current.pattern.pattern_id,
+      sentence: text
+    });
+    idb.set('pendingPractice', S.pendingPractice);
+    r.written += 1;
+    nextPatternCard();
+  }
+
+  function endPatternRound() {
+    var n = S.patternRound ? S.patternRound.written : 0;
+    S.patternRound = null;
+    show('home');
+    if (n) toast('แต่งไป ' + n + ' ประโยค เก็บไว้รอส่งตรวจแล้ว');
+    if (n && S.settings.url && navigator.onLine) sync({ quiet: true });
+  }
+
+  // ---------------------------------------------------------------- send sentences to Claude
+  var checkChunks = [];
+  function renderCheck() {
+    checkChunks = C.buildCheckText(practiceRows(), feedbackRows(), patterns(), tables().Rule_Book || []);
+    var total = checkChunks.reduce(function (a, c) { return a + c.ids.length; }, 0);
+    $('check-total').textContent = total ? 'รอตรวจ ' + total + ' ประโยค' : 'ไม่มีประโยครอตรวจ';
+    $('check-buttons').innerHTML = checkChunks.map(function (c, i) {
+      return '<button class="btn-primary wide copy-chunk" data-i="' + i + '">' + SVG.copy +
+        (checkChunks.length > 1 ? 'คัดลอกชุดที่ ' + (i + 1) + '/' + checkChunks.length + ' (' + c.ids.length + ' ประโยค)' : 'คัดลอกให้ Claude ตรวจ (' + c.ids.length + ' ประโยค)') + '</button>';
+    }).join('');
+    var pById = {};
+    patterns().forEach(function (p) { pById[p.pattern_id] = p; });
+    var fb = C.latestFeedback(feedbackRows());
+    var list = practiceRows().filter(function (x) { return !fb[x.practice_id]; });
+    $('check-list').innerHTML = list.slice().reverse().map(function (x) {
+      return '<li><span class="check-pat">' + esc((pById[x.pattern_id] || {}).pattern || x.pattern_id) + '</span><span class="check-sent">' + esc(x.sentence) + '</span></li>';
+    }).join('');
+    $('check-steps').hidden = !total;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return new Promise(function (res, rej) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy') ? res() : rej(new Error('copy')); } catch (e) { rej(e); }
+      document.body.removeChild(ta);
+    });
+  }
+
+  function copyChunk(i) {
+    var c = checkChunks[i];
+    if (!c) return;
+    // Make sure the sentences reach the sheet before Claude's feedback is pasted back.
+    if (S.pendingPractice.length && S.settings.url && navigator.onLine) sync({ quiet: true });
+    copyText(c.text).then(function () {
+      var b = document.querySelector('.copy-chunk[data-i="' + i + '"]');
+      if (b) { b.classList.add('copied'); b.innerHTML = SVG.tick + 'คัดลอกแล้ว' + (checkChunks.length > 1 ? ' (ชุดที่ ' + (i + 1) + ')' : ''); }
+      toast('คัดลอกแล้ว วางในแชต Claude ได้เลย');
+    }).catch(function () { toast('คัดลอกไม่ได้ ลองกดอีกครั้ง'); });
+  }
+
+  // ---------------------------------------------------------------- rules
+  var rulesFilter = 'all';
+  function renderRules() {
+    var all = ruleList();
+    var cats = [];
+    all.forEach(function (r) { var c = r.rule.category || 'Grammar'; if (cats.indexOf(c) < 0) cats.push(c); });
+    if (rulesFilter !== 'all' && cats.indexOf(rulesFilter) < 0) rulesFilter = 'all';
+    $('rules-filter').innerHTML = ['all'].concat(cats).map(function (c) {
+      var label = c === 'all' ? 'ทั้งหมด ' + all.length : c;
+      return '<button class="fchip" data-cat="' + esc(c) + '" aria-pressed="' + (rulesFilter === c) + '">' + esc(label) + '</button>';
+    }).join('');
+    var list = all.filter(function (r) { return rulesFilter === 'all' || (r.rule.category || 'Grammar') === rulesFilter; });
+    var weekAgo = C.addDays(today(), -7);
+    $('rules-list').innerHTML = list.map(function (r) {
+      var isNew = String(r.rule.created_at || '').slice(0, 10) >= weekAgo && r.count <= 1;
+      var badge = r.count > 1 || !isNew ? '<span class="rbadge">×' + r.count + '</span>' : '<span class="rbadge new">ใหม่</span>';
+      return '<li><button class="rule-card" data-key="' + esc(r.key) + '"><span class="rule-top"><span class="rule-title">' + esc(r.rule.title_th) + '</span>' + badge + '</span>' +
+        (r.rule.explain_th ? '<span class="rule-explain">' + esc(r.rule.explain_th) + '</span>' : '') +
+        (r.rule.wrong_example || r.rule.right_example ? '<span class="rule-ex">' + (r.rule.wrong_example ? '<s>' + esc(r.rule.wrong_example) + '</s> → ' : '') + '<b>' + esc(r.rule.right_example) + '</b></span>' : '') +
+        (r.last ? '<span class="rule-when">ผิดล่าสุด ' + esc(r.last.slice(0, 10)) + '</span>' : '') + '</button></li>';
+    }).join('') || '<li class="hint" style="padding:14px 0">' + (hasPhase2() ? 'ยังไม่มีกฎ ส่งประโยคฝึก Pattern ให้ Claude ตรวจ แล้วกฎจะขึ้นที่นี่' : 'ต้องรัน migrate_3_3 ใน Apps Script ก่อน') + '</li>';
+  }
+
+  function openRule(key) {
+    var r = ruleList().filter(function (x) { return x.key === key; })[0];
+    if (!r) return;
+    var html = '<h2>' + esc(r.rule.title_th) + '</h2><p class="hint">' + esc(r.rule.category || '') + ' · ผิด ' + r.count + ' ครั้ง</p>' +
+      (r.rule.explain_th ? '<p>' + esc(r.rule.explain_th) + '</p>' : '') +
+      (r.rule.wrong_example || r.rule.right_example ? '<p class="rule-ex">' + (r.rule.wrong_example ? '<s>' + esc(r.rule.wrong_example) + '</s> → ' : '') + '<b>' + esc(r.rule.right_example) + '</b></p>' : '');
+    if (r.examples.length) {
+      html += '<h3 class="sheet-h3">ประโยคที่คุณเคยผิด</h3><ul class="fb-list">' + r.examples.map(function (e) {
+        return '<li>' + (e.wrong ? '<s>' + esc(e.wrong) + '</s>' : '') + (e.right ? '<b>' + esc(e.right) + '</b>' : '') + (e.note ? '<span>' + esc(e.note) + '</span>' : '') + '</li>';
+      }).join('') + '</ul>';
+    }
+    $('sheet-content').innerHTML = html;
+    $('sheet').hidden = false;
+  }
+
   // ---------------------------------------------------------------- import from chat
   var lastParsed = null;
-  var STATUS_TH = { added: 'ใหม่', duplicate: 'มีแล้ว', filled: 'เติมทริค', repeated: 'ผิดซ้ำ', invalid: 'ใช้ไม่ได้' };
-  var TYPE_TH = { vocab: 'คำศัพท์', pattern: 'Pattern', mistake: 'ที่ผิด' };
+  var STATUS_TH = { added: 'ใหม่', duplicate: 'มีแล้ว', filled: 'เติมทริค', repeated: 'ผิดซ้ำ', invalid: 'ใช้ไม่ได้', checked: 'ตรวจแล้ว' };
+  var TYPE_TH = { vocab: 'คำศัพท์', pattern: 'Pattern', mistake: 'ที่ผิด', rule: 'กฎ', feedback: 'ผลตรวจประโยค' };
+  function ingestDb() { return Object.assign({}, tables(), { Pattern_Practice: practiceRows() }); }
 
   function previewAdd() {
     var text = $('add-text').value;
@@ -776,29 +1039,57 @@
       lastParsed = null;
       return;
     }
-    var plan = C.planIngest(ex.payload, tables(), today());
+    var plan = C.planIngest(ex.payload, ingestDb(), today());
     lastParsed = ex.payload;
     renderReport(plan.counts, plan.report, 'จะเพิ่ม');
-    $('save-btn').hidden = plan.counts.added + plan.counts.updated + plan.counts.examples === 0;
+    $('save-btn').hidden = plan.counts.added + plan.counts.updated + plan.counts.examples + (plan.counts.rules || 0) + (plan.counts.feedback || 0) === 0;
   }
 
   function renderReport(counts, report, verb) {
-    var html = '<p class="preview-summary">' + verb + ' ' + counts.added + ' รายการ';
-    if (counts.examples) html += ' ตัวอย่าง pattern ' + counts.examples;
-    if (counts.duplicate) html += '  มีอยู่แล้ว ' + counts.duplicate;
-    if (counts.updated) html += '  อัปเดต ' + counts.updated;
-    if (counts.invalid) html += '  ใช้ไม่ได้ ' + counts.invalid;
-    html += '</p><ul class="preview-list">';
-    report.forEach(function (r) {
-      var notes = [];
-      if (r.id && r.status !== 'added') notes.push('<span class="preview-note">' + esc(r.id) + '</span>');
-      (r.errors || []).forEach(function (e) { notes.push('<span class="preview-note err">' + esc(e) + '</span>'); });
-      (r.warnings || []).forEach(function (w) { notes.push('<span class="preview-note">' + esc(w) + '</span>'); });
-      html += '<li><span class="badge badge-' + r.status + '">' + (STATUS_TH[r.status] || r.status) + '</span>' +
-        '<div><div class="preview-label">' + esc(r.label || '-') + '</div>' +
-        '<div class="preview-note">' + (TYPE_TH[r.type] || r.type) + '</div>' + notes.join('<br>') + '</div></li>';
-    });
-    $('add-preview').innerHTML = html + '</ul>';
+    var fbItems = report.filter(function (r) { return r.type === 'feedback' && r.status === 'checked'; });
+    // Rules created by this very paste are not in the local tables yet: take their titles from the report.
+    var newTitles = {};
+    report.forEach(function (r) { if (r.type === 'rule' && r.id) newTitles[r.id] = r.label; });
+    var title = function (k) { return newTitles[k] || ruleTitle(k); };
+    var others = report.filter(function (r) { return !(r.type === 'feedback' && r.status === 'checked'); });
+    var html = '';
+    if (fbItems.length) {
+      var wrong = fbItems.filter(function (r) { return !r.ok; });
+      html += '<p class="preview-summary">ผลตรวจ ' + fbItems.length + ' ประโยค · ถูก ' + (fbItems.length - wrong.length) + ' · ต้องแก้ ' + wrong.length + '</p>';
+      if (wrong.length) {
+        html += '<ul class="fb-list">' + wrong.map(function (r) {
+          return '<li><s>' + esc(r.label) + '</s>' + (r.corrected ? '<b>' + esc(r.corrected) + '</b>' : '') +
+            (r.feedback_th ? '<span>' + esc(r.feedback_th) + '</span>' : '') +
+            ((r.rule_keys || []).length ? '<span class="fb-rules">' + r.rule_keys.map(function (k) { return esc(title(k)); }).join(' · ') + '</span>' : '') + '</li>';
+        }).join('') + '</ul>';
+      }
+    }
+    var head = verb + ' ' + counts.added + ' รายการ';
+    if (counts.rules) head += '  กฎใหม่ ' + counts.rules;
+    if (counts.examples) head += '  ตัวอย่าง pattern ' + counts.examples;
+    if (counts.duplicate) head += '  มีอยู่แล้ว ' + counts.duplicate;
+    if (counts.updated) head += '  อัปเดต ' + counts.updated;
+    if (counts.invalid) head += '  ใช้ไม่ได้ ' + counts.invalid;
+    if (others.length) {
+      html += '<p class="preview-summary">' + head + '</p><ul class="preview-list">';
+      others.forEach(function (r) {
+        var notes = [];
+        if (r.id && r.status !== 'added') notes.push('<span class="preview-note">' + esc(r.id) + '</span>');
+        (r.errors || []).forEach(function (e) { notes.push('<span class="preview-note err">' + esc(e) + '</span>'); });
+        (r.warnings || []).forEach(function (w) { notes.push('<span class="preview-note">' + esc(w) + '</span>'); });
+        html += '<li><span class="badge badge-' + r.status + '">' + (STATUS_TH[r.status] || r.status) + '</span>' +
+          '<div><div class="preview-label">' + esc(r.label || '-') + '</div>' +
+          '<div class="preview-note">' + (TYPE_TH[r.type] || r.type) + '</div>' + notes.join('<br>') + '</div></li>';
+      });
+      html += '</ul>';
+    }
+    $('add-preview').innerHTML = html;
+  }
+
+  /** Sends pattern sentences still on the phone, so pasted feedback can find them on the server. */
+  function flushPractice() {
+    if (!S.pendingPractice.length) return Promise.resolve();
+    return call('log_practice', { rows: S.pendingPractice.slice(0, 500) });
   }
 
   function saveAdd() {
@@ -813,12 +1104,12 @@
       return;
     }
     $('save-btn').disabled = true;
-    call('ingest', { payload: payload }).then(function (r) {
+    flushPractice().then(function () { return call('ingest', { payload: payload }); }).then(function (r) {
       renderReport(r.counts, r.report, 'บันทึกแล้ว');
       $('add-text').value = '';
       $('save-btn').hidden = true;
       lastParsed = null;
-      toast('บันทึกลงฐานแล้ว ' + r.counts.added + ' รายการ');
+      toast(r.counts.feedback ? 'บันทึกผลตรวจ ' + r.counts.feedback + ' ประโยคแล้ว' : 'บันทึกลงฐานแล้ว ' + r.counts.added + ' รายการ');
       return sync({ quiet: true });
     }).catch(function (err) {
       $('add-result').textContent = 'บันทึกไม่สำเร็จ: ' + err.message;
@@ -855,13 +1146,16 @@
           (s ? (s.status === 'mastered' ? 'จำได้แล้ว' : 'กำลังเรียน') : 'ยังไม่เคยทบทวน') + '"></span></button></li>';
       });
     } else if (S.libTab === 'patterns') {
+      var pst = hasPhase2() ? patternStates() : {};
+      var PST = { 'new': ['ใหม่', ''], waiting: ['รอตรวจ', 'learning'], redo: ['ต้องแต่งซ้ำ', 'redo'], passed: ['ผ่าน', 'mastered'] };
       (t.Pattern_Master || []).forEach(function (p) {
         var hay = C.normalizeKey([p.pattern, p.meaning_th, p.category].join(' '));
         if (qtext && hay.indexOf(qtext) < 0) return;
         n++;
         html += '<li><button data-kind="pattern" data-id="' + esc(p.pattern_id) + '">' +
           '<span class="lib-text"><span class="lib-word">' + esc(p.pattern) + '</span><span class="lib-th">' + esc(p.meaning_th) + '</span></span>' +
-          '<span class="lib-meta">' + esc(p.cefr || '') + '</span></button></li>';
+          '<span class="lib-meta">' + esc(pst[p.pattern_id] ? PST[pst[p.pattern_id].status][0] : (p.cefr || '')) + '</span>' +
+          (pst[p.pattern_id] ? '<span class="status-dot ' + PST[pst[p.pattern_id].status][1] + '"></span>' : '') + '</button></li>';
       });
     } else {
       (t.Mistake_Log || []).forEach(function (m) {
@@ -901,6 +1195,17 @@
         row('ความหมาย', p.meaning_th) + row('Meaning', p.meaning_en) + row('หมวด', [p.category, p.cefr, p.formality].filter(Boolean).join(', ')) +
         row('หมายเหตุ', p.notes) + '</dl>' +
         (exs.length ? '<dl>' + exs.map(function (x) { return '<dt>ตัวอย่าง</dt><dd>' + esc(x.example_en) + '<br><span class="hint">' + esc(x.example_th) + '</span></dd>'; }).join('') + '</dl>' : '');
+      var fbm = C.latestFeedback(feedbackRows());
+      var mine = practiceRows().filter(function (x) { return x.pattern_id === id; }).reverse();
+      if (mine.length) {
+        html += '<h3 class="sheet-h3">ประโยคที่คุณแต่ง</h3><ul class="fb-list">' + mine.map(function (x) {
+          var f = fbm[x.practice_id];
+          if (!f) return '<li><span class="fb-wait">รอตรวจ</span>' + esc(x.sentence) + '</li>';
+          var ok = /^yes$/i.test(String(f.ok));
+          return '<li>' + (ok ? '<b class="fb-ok">' + esc(x.sentence) + '</b>' : '<s>' + esc(x.sentence) + '</s><b>' + esc(f.corrected) + '</b>') +
+            (f.feedback_th ? '<span>' + esc(f.feedback_th) + '</span>' : '') + '</li>';
+        }).join('') + '</ul>';
+      }
     } else {
       var m = (t.Mistake_Log || []).filter(function (x) { return x.mistake_id === id; })[0];
       if (!m) return;
@@ -949,6 +1254,18 @@
       sync();
     });
     $('settings-btn').addEventListener('click', function () { show('settings'); });
+    $('pattern-btn').addEventListener('click', startPatternRound);
+    $('check-btn').addEventListener('click', function () { show('check'); });
+    $('rules-all').addEventListener('click', function () { show('rules'); });
+    $('pat-answer').addEventListener('input', function () { $('pat-save').disabled = !$('pat-answer').value.trim(); });
+    $('pat-save').addEventListener('click', savePatternSentence);
+    $('pat-skip').addEventListener('click', nextPatternCard);
+    $('pat-end').addEventListener('click', endPatternRound);
+    $('check-back').addEventListener('click', function () { show('home'); });
+    $('check-buttons').addEventListener('click', function (e) { var b = e.target.closest('.copy-chunk'); if (b) copyChunk(Number(b.dataset.i)); });
+    $('check-import').addEventListener('click', function () { show('add'); });
+    $('rules-filter').addEventListener('click', function (e) { var b = e.target.closest('.fchip'); if (b) { rulesFilter = b.dataset.cat; renderRules(); } });
+    $('rules-list').addEventListener('click', function (e) { var b = e.target.closest('.rule-card'); if (b) openRule(b.dataset.key); });
     $('settings-back').addEventListener('click', function () { show('home'); });
 
     bindSwipe();
@@ -998,9 +1315,9 @@
 
     $('set-save').addEventListener('click', saveSettings);
     $('wipe-btn').addEventListener('click', function () {
-      if (!window.confirm('ล้างข้อมูลในเครื่อง? ผลทบทวนที่ยังไม่ได้ sync จะหาย')) return;
+      if (!window.confirm('ล้างข้อมูลในเครื่อง? ผลทบทวนและประโยคที่ยังไม่ได้ sync จะหาย')) return;
       idb.clear().then(function () {
-        S.data = null; S.pending = []; S.pendingIngest = []; S.lastSync = ''; S.session = null; byId = {};
+        S.data = null; S.pending = []; S.pendingIngest = []; S.pendingPractice = []; S.lastSync = ''; S.session = null; byId = {};
         persist();
         toast('ล้างข้อมูลในเครื่องแล้ว');
         show('settings');
@@ -1013,17 +1330,19 @@
 
   function boot() {
     bind();
-    Promise.all(['settings', 'data', 'pending', 'pendingIngest', 'lastSync', 'session'].map(function (k) { return idb.get(k).catch(function () { return null; }); }))
+    Promise.all(['settings', 'data', 'pending', 'pendingIngest', 'lastSync', 'session', 'pendingPractice'].map(function (k) { return idb.get(k).catch(function () { return null; }); }))
       .then(function (v) {
         if (v[0]) S.settings = { url: v[0].url || '', token: v[0].token || '' };
         S.data = v[1] || null;
         S.pending = v[2] || [];
         S.pendingIngest = v[3] || [];
         S.lastSync = v[4] || '';
+        S.pendingPractice = v[6] || [];
         var saved = v[5];
         if (saved && saved.day === today() && saved.queue) {
           S.session = saved;
           S.session.quizzes = saved.quizzes || { A: { n: 0, ok: 0 }, B: { n: 0, ok: 0 } };
+          if (!S.session.quizzes.C) S.session.quizzes.C = { n: 0, ok: 0 };
           S.session.retried = saved.retried || {};
         } else if (saved) {
           idb.del('session').catch(function () {});
