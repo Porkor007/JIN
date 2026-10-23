@@ -1,5 +1,5 @@
 /* Offline cache. Bump VERSION whenever any app file changes. */
-var VERSION = 'jin-v2.0.1';
+var VERSION = 'jin-v2.1.0';
 var SHELL = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png'];
 var FONT_CSS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap';
