@@ -1,7 +1,7 @@
 /* JIN review app. Vanilla JS, offline-first. Data lives in IndexedDB; the Google Sheet is the source of truth. */
 (function () {
   'use strict';
-  var APP_VERSION = '2.0.0';
+  var APP_VERSION = '2.0.1';
   var $ = function (id) { return document.getElementById(id); };
   var C = EKBCore;
 
