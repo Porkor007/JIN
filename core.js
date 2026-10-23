@@ -304,6 +304,32 @@ var EKBCore = (function () {
     var counts = { added: 0, duplicate: 0, invalid: 0, updated: 0, examples: 0 };
     var date = today || '';
 
+    var colNow = {};
+    /** Appends new preposition rows to a saved word's collocation; returns how many were added. */
+    function appendPrepRows(id, savedValue, incoming) {
+      var current = Object.prototype.hasOwnProperty.call(colNow, id) ? colNow[id] : toList(savedValue);
+      var have = {};
+      splitCollocation(current).preps.forEach(function (r) { have[normalizeKey(r.base) + '|' + r.prep] = true; });
+      var add = [];
+      splitCollocation(incoming).preps.forEach(function (r) {
+        var k = normalizeKey(r.base) + '|' + r.prep;
+        if (have[k]) return;
+        have[k] = true;
+        add.push(r.base + ' + ' + r.prep + ' = ' + r.meaning);
+      });
+      if (!add.length) return 0;
+      // Preposition rows go first so they read as a group; ordinary collocations follow unchanged.
+      var parts = splitCollocation(current);
+      var oldPrepItems = current.filter(function (x) { return PREP_ROW.test(x); });
+      var next = oldPrepItems.concat(add).concat(parts.plain);
+      colNow[id] = next;
+      var value = next.join(DELIM);
+      var existing = updates.filter(function (u) { return u.id === id && u.col === 'collocation'; })[0];
+      if (existing) existing.value = value;
+      else updates.push({ table: 'Knowledge_Master', idCol: 'word_id', id: id, col: 'collocation', value: value });
+      return add.length;
+    }
+
     function resolvePattern(ref) {
       if (!ref) return { id: '' };
       var byId = patternIds[ref.toUpperCase()];
@@ -358,12 +384,22 @@ var EKBCore = (function () {
           var dupId = wordByKey[v.row.word_key];
           item.id = dupId;
           var oldRow = wordRowById[dupId];
-          // Only fills a blank usage_tip on a saved row; never overwrites a value.
+          var changed = false;
+          // Fills a blank usage_tip on a saved row; never overwrites a value.
           if (oldRow && v.row.usage_tip && !str(oldRow.usage_tip) && !tipFilled[dupId]) {
             updates.push({ table: 'Knowledge_Master', idCol: 'word_id', id: dupId, col: 'usage_tip', value: v.row.usage_tip });
             tipFilled[dupId] = true;
-            item.status = 'filled'; counts.updated += 1; return;
+            changed = true;
           }
+          // Adds "base + prep = meaning" rows the saved word does not have yet; keeps every existing item.
+          if (oldRow) {
+            var addedPreps = appendPrepRows(dupId, oldRow.collocation, v.row.collocation);
+            if (addedPreps) {
+              item.preps_added = addedPreps;
+              changed = true;
+            }
+          }
+          if (changed) { item.status = 'filled'; counts.updated += 1; return; }
           item.status = 'duplicate'; counts.duplicate += 1; return;
         }
         var p = resolvePattern(v.pattern_ref);
