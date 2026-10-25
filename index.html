@@ -140,9 +140,11 @@
     </div>
     <div class="pat-scroll" id="pat-scroll">
       <div id="pat-body"></div>
-      <label class="pat-label" for="pat-answer">แต่งประโยคของคุณเองด้วย Pattern นี้</label>
-      <textarea id="pat-answer" rows="4" placeholder="พิมพ์ประโยคภาษาอังกฤษ... แต่งกี่ประโยคก็ได้" autocapitalize="sentences" spellcheck="false"></textarea>
-      <p class="hint pat-info">ประโยคจะเก็บเข้าคลังไว้ ส่งให้ Claude ตรวจทีเดียวตอนไหนก็ได้ ไม่มีคะแนน ถ้าผิด Pattern นี้จะกลับมาให้แต่งใหม่</p>
+      <div id="pat-write">
+        <label class="pat-label" for="pat-answer">แต่งประโยคของคุณเองด้วย Pattern นี้</label>
+        <textarea id="pat-answer" rows="4" placeholder="พิมพ์ประโยคภาษาอังกฤษ... แต่งกี่ประโยคก็ได้" autocapitalize="sentences" spellcheck="false"></textarea>
+        <p class="hint pat-info">ประโยคจะเก็บเข้าคลังไว้ ส่งให้ Claude ตรวจทีเดียวตอนไหนก็ได้ ไม่มีคะแนน ถ้าผิด Pattern นี้จะกลับมาให้แต่งใหม่</p>
+      </div>
     </div>
     <div class="pat-actions">
       <button class="btn-ghost" id="pat-skip">ข้าม</button>

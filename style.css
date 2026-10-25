@@ -383,3 +383,16 @@ body.no-scroll .toast { bottom: auto; top: calc(var(--safe-t) + 66px); }
 .qc-fill { color: var(--accent); border-bottom: 3px solid var(--accent); }
 .qc-opt { min-height: 56px; border-radius: 14px; border: 1.5px solid var(--border); background: var(--surface); font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px; }
 .qc-opt svg { width: 18px; height: 18px; stroke-width: 3; }
+
+/* ---------------------------------------------------------------- 3.4: question before writing */
+.pat-mean.big { font-size: 20px; font-weight: 700; color: var(--text); margin: 12px 0 4px; }
+.slot-quiz { background: var(--surface); border-radius: 16px; padding: 14px; margin: 10px 0 14px; display: flex; flex-direction: column; gap: 10px; }
+.slot-q { font-size: 13px; font-weight: 700; color: var(--accent); }
+.slot-prompt { font-family: var(--mono); font-size: 19px; font-weight: 700; line-height: 1.45; margin: 0; overflow-wrap: anywhere; }
+.slot-blank { display: inline-block; min-width: 64px; border-bottom: 3px solid var(--accent); color: var(--accent); text-align: center; line-height: 1.1; }
+.slot-opts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.slot-opt { min-height: 52px; border-radius: 12px; border: 1.5px solid var(--border); background: var(--surface-2); font-family: var(--mono); font-size: 15px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; text-align: center; }
+.slot-opt svg { width: 16px; height: 16px; stroke-width: 3; flex: none; }
+.slot-why { margin: 0; font-size: 14px; line-height: 1.5; border-radius: 10px; padding: 8px 10px; }
+.slot-why.ok { background: var(--good-bg); color: var(--good-ink); }
+.slot-why.no { background: var(--bad-bg); color: var(--bad-ink); }
