@@ -1,7 +1,7 @@
 /* JIN review app. Vanilla JS, offline-first. Data lives in IndexedDB; the Google Sheet is the source of truth. */
 (function () {
   'use strict';
-  var APP_VERSION = '2.1.0';
+  var APP_VERSION = '2.2.0';
   var $ = function (id) { return document.getElementById(id); };
   var C = EKBCore;
 
@@ -877,42 +877,79 @@
     var r = S.patternRound;
     var pick = C.nextPattern(patterns(), patternStates(), today(), r.shown);
     r.current = pick;
+    // The question comes first; until it is answered nothing that gives the answer away is shown.
+    r.quiz = pick ? C.parseSlotQuiz(pick.pattern.slot_quiz) : null;
+    r.picked = null;
     if (pick) r.shown.push(pick.pattern.pattern_id);
     renderPatternCard();
+  }
+
+  function quizHtml(q, picked) {
+    var done = picked !== null;
+    var right = done && picked === q.answer;
+    var prompt = esc(q.prompt).replace('___', done ? '<span class="qc-fill">' + esc(q.answer) + '</span>' : '<span class="slot-blank">&nbsp;?&nbsp;</span>');
+    return '<div class="slot-quiz"><span class="slot-q">' + (done ? (right ? 'ถูกต้อง' : 'ยังไม่ใช่') : 'ช่องว่างต้องเป็นอะไร? ตอบก่อนแต่ง') + '</span>' +
+      '<p class="slot-prompt">' + prompt + '</p><div class="slot-opts">' + q.options.map(function (o, i) {
+        var isAns = o === q.answer;
+        var isPicked = picked === o;
+        var mark = done && isAns ? SVG.tick : (done && isPicked ? SVG.cross : '');
+        return '<button class="slot-opt' + markClass(isAns, isPicked, done) + '" data-slot="' + i + '"' + (done ? ' disabled' : '') +
+          ' aria-label="' + esc(o) + (done && isAns ? ' (คำตอบที่ถูก)' : (done && isPicked ? ' (ผิด)' : '')) + '">' + mark + esc(o) + '</button>';
+      }).join('') + '</div>' +
+      (done && q.why ? '<p class="slot-why ' + (right ? 'ok' : 'no') + '">' + esc(q.why) + '</p>' : '') + '</div>';
   }
 
   function renderPatternCard() {
     var r = S.patternRound;
     $('pat-written').textContent = r.written;
     var pick = r.current;
-    if (!pick) { $('pat-body').innerHTML = '<p class="hint">ยังไม่มี Pattern ในคลัง</p>'; return; }
+    if (!pick) { $('pat-body').innerHTML = '<p class="hint">ยังไม่มี Pattern ในคลัง</p>'; $('pat-write').hidden = true; $('pat-save').hidden = true; return; }
     var p = pick.pattern;
     var st = pick.state;
+    var locked = !!r.quiz && r.picked === null;
     var ex = (tables().Pattern_Examples || []).filter(function (x) { return x.pattern_id === p.pattern_id; });
     var reason = REASON_UI[pick.reason] || REASON_UI.again;
     var html = '<div class="pat-head"><span class="pat-reason ' + reason.cls + '">' + reason.label + '</span>' +
-      (p.cefr ? '<span class="pat-cefr">' + esc(p.cefr) + '</span>' : '') + '</div>' +
-      '<h2 class="pat-title">' + esc(p.pattern) + '</h2>' +
-      (p.meaning_th ? '<p class="pat-mean">' + esc(p.meaning_th) + '</p>' : '') +
-      (p.structure ? '<div class="pat-chips">' + C.structureChips(p.structure).map(chipHtml).join('') + '</div>' : '') +
-      (p.notes ? '<p class="pat-notes">' + esc(p.notes) + '</p>' : '');
-    if (ex.length) {
-      var e = ex[0];
-      html += '<div class="pat-example"><span class="en">' + esc(e.example_en) + '</span>' + (e.example_th ? '<span class="th">' + esc(e.example_th) + '</span>' : '') + '</div>';
-    }
-    if (st && st.lastFeedback && !st.lastFeedback.ok) {
-      var f = st.lastFeedback;
-      html += '<div class="pat-last"><span class="pat-last-title">ครั้งก่อนยังผิด</span>' +
-        '<span class="pat-last-wrong">' + esc(f.sentence) + '</span>' +
-        (f.corrected ? '<span class="pat-last-right">' + esc(f.corrected) + '</span>' : '') +
-        (f.feedback_th ? '<span class="pat-last-note">' + esc(f.feedback_th) + '</span>' : '') +
-        (f.rule_keys.length ? '<span class="pat-last-rules">' + f.rule_keys.map(function (k) { return esc(ruleTitle(k)); }).join(' · ') + '</span>' : '') +
-        '</div>';
+      (p.cefr ? '<span class="pat-cefr">' + esc(p.cefr) + '</span>' : '') + '</div>';
+    if (locked) {
+      html += (p.meaning_th ? '<p class="pat-mean big">' + esc(p.meaning_th) + '</p>' : '') + quizHtml(r.quiz, null);
+    } else {
+      html += '<h2 class="pat-title">' + esc(p.pattern) + '</h2>' +
+        (p.meaning_th ? '<p class="pat-mean">' + esc(p.meaning_th) + '</p>' : '') +
+        (r.quiz ? quizHtml(r.quiz, r.picked) : '') +
+        (p.structure ? '<div class="pat-chips">' + C.structureChips(p.structure).map(chipHtml).join('') + '</div>' : '') +
+        (p.notes ? '<p class="pat-notes">' + esc(p.notes) + '</p>' : '');
+      if (ex.length) {
+        var e = ex[0];
+        html += '<div class="pat-example"><span class="en">' + esc(e.example_en) + '</span>' + (e.example_th ? '<span class="th">' + esc(e.example_th) + '</span>' : '') + '</div>';
+      }
+      if (st && st.lastFeedback && !st.lastFeedback.ok) {
+        var f = st.lastFeedback;
+        html += '<div class="pat-last"><span class="pat-last-title">ครั้งก่อนยังผิด</span>' +
+          '<span class="pat-last-wrong">' + esc(f.sentence) + '</span>' +
+          (f.corrected ? '<span class="pat-last-right">' + esc(f.corrected) + '</span>' : '') +
+          (f.feedback_th ? '<span class="pat-last-note">' + esc(f.feedback_th) + '</span>' : '') +
+          (f.rule_keys.length ? '<span class="pat-last-rules">' + f.rule_keys.map(function (k) { return esc(ruleTitle(k)); }).join(' · ') + '</span>' : '') +
+          '</div>';
+      }
     }
     $('pat-body').innerHTML = html;
-    $('pat-answer').value = '';
-    $('pat-save').disabled = true;
-    $('pat-scroll').scrollTop = 0;
+    $('pat-write').hidden = locked;
+    $('pat-save').hidden = locked;
+    if (r.picked === null) {
+      $('pat-answer').value = '';
+      $('pat-save').disabled = true;
+      $('pat-scroll').scrollTop = 0;
+    }
+  }
+
+  function answerSlot(i) {
+    var r = S.patternRound;
+    if (!r || !r.quiz || r.picked !== null) return;
+    r.picked = r.quiz.options[i];
+    r.quizAsked = (r.quizAsked || 0) + 1;
+    if (r.picked === r.quiz.answer) r.quizRight = (r.quizRight || 0) + 1;
+    renderPatternCard();
   }
 
   function savePatternSentence() {
@@ -931,10 +968,14 @@
   }
 
   function endPatternRound() {
-    var n = S.patternRound ? S.patternRound.written : 0;
+    var r = S.patternRound || {};
+    var n = r.written || 0;
     S.patternRound = null;
     show('home');
-    if (n) toast('แต่งไป ' + n + ' ประโยค เก็บไว้รอส่งตรวจแล้ว');
+    var msg = [];
+    if (r.quizAsked) msg.push('ตอบคำถามถูก ' + (r.quizRight || 0) + '/' + r.quizAsked);
+    if (n) msg.push('แต่งไป ' + n + ' ประโยค เก็บไว้รอส่งตรวจแล้ว');
+    if (msg.length) toast(msg.join(' · '), 4000);
     if (n && S.settings.url && navigator.onLine) sync({ quiet: true });
   }
 
@@ -1260,6 +1301,7 @@
     $('pat-answer').addEventListener('input', function () { $('pat-save').disabled = !$('pat-answer').value.trim(); });
     $('pat-save').addEventListener('click', savePatternSentence);
     $('pat-skip').addEventListener('click', nextPatternCard);
+    $('pat-body').addEventListener('click', function (e) { var b = e.target.closest('.slot-opt'); if (b && !b.disabled) answerSlot(Number(b.dataset.slot)); });
     $('pat-end').addEventListener('click', endPatternRound);
     $('check-back').addEventListener('click', function () { show('home'); });
     $('check-buttons').addEventListener('click', function (e) { var b = e.target.closest('.copy-chunk'); if (b) copyChunk(Number(b.dataset.i)); });

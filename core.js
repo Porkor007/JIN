@@ -5,7 +5,7 @@
 var EKBCore = (function () {
   'use strict';
 
-  var SCHEMA_VERSION = '3.3';
+  var SCHEMA_VERSION = '3.4';
   var DELIM = '; ';
   var CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
   var FREQUENCY = ['High', 'Medium', 'Low'];
@@ -17,7 +17,7 @@ var EKBCore = (function () {
     Knowledge_Master: ['word_id', 'word', 'word_key', 'ipa', 'thai_pron', 'cefr', 'pos', 'meaning_en', 'meaning_th',
       'synonym', 'antonym', 'collocation', 'word_family', 'root', 'prefix', 'suffix', 'frequency', 'register',
       'example', 'example_th', 'pattern_id', 'related_expressions', 'tags', 'difficulty', 'source', 'date_added', 'notes', 'usage_tip'],
-    Pattern_Master: ['pattern_id', 'pattern', 'category', 'cefr', 'meaning_en', 'meaning_th', 'structure', 'formality', 'notes', 'difficulty'],
+    Pattern_Master: ['pattern_id', 'pattern', 'category', 'cefr', 'meaning_en', 'meaning_th', 'structure', 'formality', 'notes', 'difficulty', 'slot_quiz'],
     Pattern_Examples: ['example_id', 'pattern_id', 'example_en', 'example_th', 'note', 'source'],
     Mistake_Log: ['mistake_id', 'wrong_text', 'correct_text', 'error_type', 'reason_en', 'reason_th', 'pattern_id',
       'difficulty', 'word_id', 'times_repeated', 'fixed', 'rule_key'],
@@ -175,6 +175,37 @@ var EKBCore = (function () {
     return { ok: false, error: lastErr };
   }
 
+  // ---------- pattern quiz before writing ("I wish + S + ___") ----------
+  /**
+   * Stored as one cell: "prompt | answer | wrong 1; wrong 2; wrong 3 | why (Thai)".
+   * Accepts that string or {prompt, answer, options|wrong, why_th}. Returns '' when it is not usable.
+   */
+  function normalizeSlotQuiz(v) {
+    if (v === null || v === undefined || v === '') return '';
+    var prompt, answer, wrong, why;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      prompt = str(v.prompt); answer = str(v.answer);
+      wrong = toList(v.wrong || v.distractors || v.options).filter(function (x) { return normalizeKey(x) !== normalizeKey(answer); });
+      why = str(v.why_th || v.why);
+    } else {
+      var parts = String(v).split(/\s*\|\s*/);
+      if (parts.length < 3) return '';
+      prompt = str(parts[0]); answer = str(parts[1]); wrong = toList(parts[2]); why = str(parts.slice(3).join(' / '));
+    }
+    if (!prompt || !answer || !wrong.length) return '';
+    return [prompt, answer, wrong.slice(0, 3).join(DELIM), why].join(' | ').replace(/ \| $/, '');
+  }
+
+  /** {prompt, answer, options (shuffled, answer included), why} or null. */
+  function parseSlotQuiz(v, rng) {
+    var n = normalizeSlotQuiz(v);
+    if (!n) return null;
+    var parts = n.split(' | ');
+    var answer = parts[1];
+    var opts = [answer].concat(toList(parts[2]));
+    return { prompt: parts[0], answer: answer, options: shuffle(opts, rng || Math.random), why: parts[3] || '' };
+  }
+
   // ---------- validation ----------
   function validateVocab(e) {
     var errors = [];
@@ -242,7 +273,8 @@ var EKBCore = (function () {
         structure: str(e.structure),
         formality: form,
         notes: str(e.notes),
-        difficulty: diff
+        difficulty: diff,
+        slot_quiz: normalizeSlotQuiz(e.slot_quiz)
       },
       id_hint: str(e.id_hint) || hintFromPattern(e.pattern),
       examples: examples
@@ -302,7 +334,10 @@ var EKBCore = (function () {
     km.forEach(function (r) { wordByKey[normalizeKey(r.word_key || r.word)] = r.word_id; wordRowById[r.word_id] = r; });
     var patternIds = {};
     var patternByText = {};
+    var patternRowById = {};
+    var quizFilled = {};
     pm.forEach(function (r) {
+      patternRowById[r.pattern_id] = r;
       patternIds[str(r.pattern_id).toUpperCase()] = r.pattern_id;
       patternByText[normalizeKey(r.pattern)] = r.pattern_id;
     });
@@ -499,9 +534,19 @@ var EKBCore = (function () {
         item.label = pv.row.pattern;
         item.warnings = pv.warnings;
         if (pv.errors.length) { item.status = 'invalid'; item.errors = pv.errors; counts.invalid += 1; return; }
-        var pid = patternByText[normalizeKey(pv.row.pattern)];
+        var pid = (str(e.pattern_id) && patternIds[str(e.pattern_id).toUpperCase()]) || patternByText[normalizeKey(pv.row.pattern)];
         if (pid) {
           item.status = 'duplicate'; item.id = pid; counts.duplicate += 1;
+          // Fills a blank slot_quiz on a saved pattern; never overwrites.
+          var prow0 = patternRowById[pid];
+          if (prow0 && pv.row.slot_quiz && !str(prow0.slot_quiz) && !quizFilled[pid]) {
+            updates.push({ table: 'Pattern_Master', idCol: 'pattern_id', id: pid, col: 'slot_quiz', value: pv.row.slot_quiz });
+            quizFilled[pid] = true;
+            item.status = 'filled'; counts.duplicate -= 1; counts.updated += 1;
+          }
+        } else if (e.fill_only) {
+          // One-time fills (quizzes, examples) must never create a pattern that is not in the sheet.
+          item.status = 'invalid'; item.errors.push('ไม่พบ pattern นี้ในชีต เลยข้าม'); counts.invalid += 1; return;
         } else {
           pid = nextPattern(pv.id_hint);
           var prow = Object.assign({ pattern_id: pid }, pv.row);
@@ -1261,6 +1306,8 @@ var EKBCore = (function () {
     makeQuizC: makeQuizC,
     pickQuizTurn: pickQuizTurn,
     structureChips: structureChips,
+    normalizeSlotQuiz: normalizeSlotQuiz,
+    parseSlotQuiz: parseSlotQuiz,
     LIGHT_VERBS: LIGHT_VERBS
   };
 })();
